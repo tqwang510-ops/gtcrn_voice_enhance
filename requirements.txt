@@ -1,5 +1,9 @@
-einops==0.7.0
-numpy==1.24.4
-ptflops==0.7
-soundfile==0.12.1
-torch==1.11.0
+# Install a CUDA-compatible PyTorch build for the target machine first.
+torch>=2.0
+einops>=0.7
+matplotlib>=3.7
+numpy>=1.24
+pesq>=0.0.4
+pystoi>=0.3.3
+scipy>=1.10
+soundfile>=0.12

@@ -1,0 +1,8 @@
+.deps/
+.idea/
+__pycache__/
+*.pyc
+checkpoints_custom/
+runs/
+evaluation/
+test_wavs/*_enh.wav

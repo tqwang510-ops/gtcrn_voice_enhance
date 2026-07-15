@@ -2,6 +2,13 @@
 GTCRN: ShuffleNetV2 + SFE + TRA + 2 DPGRNN
 Ultra tiny, 33.0 MMACs, 23.67 K params
 """
+import os
+import sys
+
+local_deps = os.path.join(os.path.dirname(__file__), ".deps")
+if os.path.isdir(local_deps) and local_deps not in sys.path:
+    sys.path.insert(0, local_deps)
+
 import torch
 import numpy as np
 import torch.nn as nn
@@ -275,9 +282,9 @@ class Mask(nn.Module):
 
 
 class GTCRN(nn.Module):
-    def __init__(self):
+    def __init__(self, nfft=512, fs=16000, erb_subband_1=65, erb_subband_2=64):
         super().__init__()
-        self.erb = ERB(65, 64)
+        self.erb = ERB(erb_subband_1, erb_subband_2, nfft=nfft, fs=fs)
         self.sfe = SFE(3, 1)
 
         self.encoder = Encoder()
@@ -298,7 +305,7 @@ class GTCRN(nn.Module):
         spec_real = spec[..., 0].permute(0,2,1)
         spec_imag = spec[..., 1].permute(0,2,1)
         spec_mag = torch.sqrt(spec_real**2 + spec_imag**2 + 1e-12)
-        feat = torch.stack([spec_mag, spec_real, spec_imag], dim=1)  # (B,3,T,257)
+        feat = torch.stack([spec_mag, spec_real, spec_imag], dim=1)  # (B,3,T,F)
 
         feat = self.erb.bm(feat)  # (B,3,T,129)
         feat = self.sfe(feat)     # (B,9,T,129)

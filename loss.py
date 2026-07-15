@@ -1,14 +1,18 @@
 import torch
 import torch.nn as nn
 
+from audio_utils import stft_to_wav
+
 
 class HybridLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, n_fft=512, hop_length=256, win_length=512, center=True):
         super().__init__()
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.center = center
 
     def forward(self, pred_stft, true_stft):
-        device = pred_stft.device
-
         pred_stft_real, pred_stft_imag = pred_stft[:,:,:,0], pred_stft[:,:,:,1]
         true_stft_real, true_stft_imag = true_stft[:,:,:,0], true_stft[:,:,:,1]
         pred_mag = torch.sqrt(pred_stft_real**2 + pred_stft_imag**2 + 1e-12)
@@ -21,8 +25,20 @@ class HybridLoss(nn.Module):
         imag_loss = nn.MSELoss()(pred_imag_c, true_imag_c)
         mag_loss = nn.MSELoss()(pred_mag**(0.3), true_mag**(0.3))
         
-        y_pred = torch.istft(pred_stft_real+1j*pred_stft_imag, 512, 256, 512, window=torch.hann_window(512).pow(0.5).to(device))
-        y_true = torch.istft(true_stft_real+1j*true_stft_imag, 512, 256, 512, window=torch.hann_window(512).pow(0.5).to(device))
+        y_pred = stft_to_wav(
+            pred_stft,
+            self.n_fft,
+            self.hop_length,
+            self.win_length,
+            center=self.center,
+        )
+        y_true = stft_to_wav(
+            true_stft,
+            self.n_fft,
+            self.hop_length,
+            self.win_length,
+            center=self.center,
+        )
         y_true = torch.sum(y_true * y_pred, dim=-1, keepdim=True) * y_true / (torch.sum(torch.square(y_true),dim=-1,keepdim=True) + 1e-8)
 
         sisnr =  - torch.log10(torch.norm(y_true, dim=-1, keepdim=True)**2 / (torch.norm(y_pred - y_true, dim=-1, keepdim=True)**2+1e-8) + 1e-8).mean()
