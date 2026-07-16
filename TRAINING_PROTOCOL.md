@@ -1125,3 +1125,77 @@ checkpoint selection should monitor:
 runs\cross_evaluation\voicebank_on_classroom
 runs\cross_evaluation\classroom_on_voicebank
 ```
+
+### 12.12 classroom_replay_v3 实验设计（2026-07-16）
+
+`classroom_v2` 已证明场景微调有效，但也证明只用教室数据会产生明显的灾难性
+遗忘。下一步只改变一个变量：在每个 epoch 中加入 VoiceBank replay，暂不改变
+片段长度、STFT、数据总量和目标定义。
+
+固定设置：
+
+```text
+初始化 checkpoint: runs\classroom_v2\checkpoints\best.tar
+每轮样本总数:       10000
+classroom_v2:        7500 (75%)
+VoiceBank replay:    2500 (25%)
+片段长度:            2 s
+STFT:                16 kHz, win=160, hop=80, n_fft=256, center=true
+batch size:          8
+epochs:              30
+max learning rate:   1e-4
+checkpoint 选择:     0.75 * classroom valid loss + 0.25 * VoiceBank valid loss
+```
+
+每轮从两个训练池确定性地重新抽样；当源数据数量足够时不重复抽取。混合后的
+10000 个索引再确定性打乱。训练 DataLoader 不使用 persistent worker，确保
+`set_epoch()` 更新后的裁剪位置和 replay 日程真正传到 worker 进程。
+
+PowerShell 正式训练命令：
+
+```powershell
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py `
+  --train-noisy ..\dataset_classroom_v2\generated\train\noisy `
+  --train-clean ..\dataset_classroom_v2\generated\train\clean `
+  --valid-noisy ..\dataset_classroom_v2\generated\valid\noisy `
+  --valid-clean ..\dataset_classroom_v2\generated\valid\clean `
+  --train-manifest ..\dataset_classroom_v2\generated\metadata\train.json `
+  --valid-manifest ..\dataset_classroom_v2\generated\metadata\valid.json `
+  --replay-train-noisy ..\dataset\train\noisy `
+  --replay-train-clean ..\dataset\train\clean `
+  --replay-train-manifest ..\dataset\splits\voicebank_serious\train.json `
+  --replay-valid-noisy ..\dataset\train\noisy `
+  --replay-valid-clean ..\dataset\train\clean `
+  --replay-valid-manifest ..\dataset\splits\voicebank_serious\valid.json `
+  --replay-fraction 0.25 `
+  --epoch-size 10000 `
+  --out-dir runs\classroom_replay_v3 `
+  --epochs 30 --batch-size 8 --lr 1e-4 `
+  --scheduler warmup_cosine --warmup-epochs 3 `
+  --warmup-start-lr 1e-6 --min-lr 1e-5 `
+  --num-workers 4 --seed 20260716 `
+  --init-checkpoint runs\classroom_v2\checkpoints\best.tar
+```
+
+正式训练前先用小数据运行 1 epoch smoke test。训练完成后必须重复四格评估；
+只有当 classroom 指标基本保持、VoiceBank 指标明显恢复时，才说明 replay 有效。
+如果 VoiceBank 恢复不足，再比较 35% replay；如果教室域退化明显，再比较 15%。
+
+#### 12.12.1 replay smoke test（2026-07-16）
+
+使用 32 个训练项（24 classroom + 8 VoiceBank）、两边各 8 个验证文件、
+`num_workers=2` 完成 1 epoch：
+
+```text
+device:                 cuda
+train loss:             2.10715486
+classroom valid loss:   1.69255197
+VoiceBank valid loss:   2.87019908
+weighted selection:     1.98696375
+```
+
+确定性日程单独检查结果为 7500/2500，两个源内均无重复；相同 seed 和 epoch
+得到完全相同的日程，切换 epoch 后日程变化。smoke test 已验证 `metrics.csv`、
+`training_curve.png`、`last.tar`、`best.tar` 和 checkpoint 内的三项验证指标均正常。
+正式训练输出使用 `runs\classroom_replay_v3`，smoke 输出只保留在忽略目录
+`runs\classroom_replay_v3_smoke`，不纳入 Git。
