@@ -1199,3 +1199,31 @@ weighted selection:     1.98696375
 `training_curve.png`、`last.tar`、`best.tar` 和 checkpoint 内的三项验证指标均正常。
 正式训练输出使用 `runs\classroom_replay_v3`，smoke 输出只保留在忽略目录
 `runs\classroom_replay_v3_smoke`，不纳入 Git。
+
+#### 12.12.2 正式训练手动接管（2026-07-16）
+
+正式训练已完成前 2 个 epoch 后按用户要求终止，进程已退出，结果完整保存在：
+
+```text
+runs\classroom_replay_v3\metrics.csv
+runs\classroom_replay_v3\checkpoints\last.tar
+runs\classroom_replay_v3\checkpoints\best.tar
+```
+
+当前记录：
+
+```text
+epoch  lr        train     classroom valid  VoiceBank valid  selection
+1      1e-6      2.5445    2.5898           3.0816           2.7128
+2      5.05e-5   2.4056    2.4626           2.4528           2.4602
+```
+
+在 `(work) D:\modeltraining\gtcrn>` 的 Windows CMD 中，使用下面这一整行从
+epoch 3 恢复。CMD 不支持 PowerShell 反引号续行，因此不能拆成之前那种多行命令：
+
+```bat
+python train_custom.py --train-noisy ..\dataset_classroom_v2\generated\train\noisy --train-clean ..\dataset_classroom_v2\generated\train\clean --valid-noisy ..\dataset_classroom_v2\generated\valid\noisy --valid-clean ..\dataset_classroom_v2\generated\valid\clean --train-manifest ..\dataset_classroom_v2\generated\metadata\train.json --valid-manifest ..\dataset_classroom_v2\generated\metadata\valid.json --replay-train-noisy ..\dataset\train\noisy --replay-train-clean ..\dataset\train\clean --replay-train-manifest ..\dataset\splits\voicebank_serious\train.json --replay-valid-noisy ..\dataset\train\noisy --replay-valid-clean ..\dataset\train\clean --replay-valid-manifest ..\dataset\splits\voicebank_serious\valid.json --replay-fraction 0.25 --epoch-size 10000 --out-dir runs\classroom_replay_v3 --epochs 30 --batch-size 8 --lr 1e-4 --scheduler warmup_cosine --warmup-epochs 3 --warmup-start-lr 1e-6 --min-lr 1e-5 --num-workers 4 --seed 20260716 --resume runs\classroom_replay_v3\checkpoints\last.tar
+```
+
+这里必须使用 `--resume`，因为需要连同第 2 轮的优化器、学习率进度和历史记录
+继续；不要再使用 `--init-checkpoint`，否则会从 epoch 1 重新开始一个新优化器。
