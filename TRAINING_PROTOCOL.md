@@ -1327,3 +1327,116 @@ runs\classroom_replay_v3\evaluation_classroom_filtered\worst_improvements
    教室效果下降明显可比较 15%；实时前视不可接受时再单独训练 `center=false` 版本。
 
 下一阶段的首要工作是“真实教室验收 + 流式一致性测试”，不是立即扩大合成数据集。
+
+## 13. classroom_v4 数据重构（2026-07-16）
+
+在 `classroom_replay_v3` 已证明 25% replay 有效后，下一版扩展合成数据覆盖，
+但不覆盖 `classroom_v2`。目标场景明确限制为普通平层教室：典型面积约
+50-60 m²，最大约 100 m²，不考虑阶梯教室、礼堂和大型会议厅。
+
+### 13.1 数据规模与不变项
+
+```text
+train: 20000 x 4 s = 22.22 h
+valid:  1000 x 4 s =  1.11 h
+test:   1000 x 4 s =  1.11 h
+fs: 16 kHz mono
+target: first 50 ms early reflections
+scene probabilities: same as classroom_v2
+SNR profile: quiet_classroom
+```
+
+4 秒语音由同一说话人的多条 VoiceBank 短句拼接，中间随机加入 80-300 ms
+停顿，不使用循环重复或尾部补 2 秒零。train/valid/test 继续保持 speaker 隔离。
+
+### 13.2 RIR 来源和教室尺寸限制
+
+混响样本按以下权重选择来源：
+
+```text
+40% BUT ReverbDB real
+20% RIRS_NOISES real
+40% RIRS_NOISES simulated
+```
+
+BUT 根据 `env_meta.txt` 过滤，只保留面积 25-100 m²、层高不超过 4.5 m 的
+普通房间。实际保留 C236、Q301、L207、L212；大型阶梯教室 D105、大型
+lecture room E112、酒店大型会议厅、楼梯间和过小酒店客房全部排除。
+
+RIRS real 只保留 office、meeting、RVB small/medium room 和 RWCP office。
+明确标记为 largeroom、lecture、aula、stairway、booth、corridor 的 RIR 不使用。
+
+simulated RIR 读取 `room_info`，严格限制：
+
+```text
+area:   40-100 m²
+length: 5-15 m
+width:  4-10 m
+height: 2.5-4.2 m
+```
+
+筛选后得到 32 个 smallroom、3200 个 RIR；mediumroom 和 largeroom 均没有
+满足本项目限制的房间。生成时进一步要求估计 RT60 在 0.15-1.5 s 内。
+多通道真实 RIR 随机选单通道，不再直接平均多个通道。
+
+所有来源均按物理 `room_id` 划分 train/valid/test，不按单个 RIR 文件随机拆分。
+
+### 13.3 背景噪声与前景事件
+
+MS-SNSD 从 Microsoft 官方仓库以 sparse checkout 下载，仅保留：
+
+```text
+dataset\MS-SNSD-sparse\noise_train: 128 files, 3.29 h
+dataset\MS-SNSD-sparse\noise_test:   51 files, 0.66 h
+```
+
+连续背景来源权重：
+
+```text
+55% MS-SNSD semantic indoor categories
+25% PRESTO/PCAFETER
+10% RIRS isotropic noise
+10% ESC-50 continuous categories
+```
+
+MS-SNSD 使用 AirConditioner、Office、Typing、CopyMachine、Hallway、
+NeighborSpeaking、VacuumCleaner、WasherDryer 等室内类别；交通、车站、机场、
+公园等室外类别不进入主体训练分布。官方 `noise_train` 只用于 train，官方
+`noise_test` 再按文件拆为 valid/test。
+
+ESC-50 使用 fold 1-3/4/5 对应 train/valid/test。明确语义的 door knock、door
+creak、footsteps、keyboard、mouse click、clock alarm、clapping、coughing、
+sneezing、water drops 等作为前景事件，以 10% 概率叠加在带噪语音场景。
+
+前景事件不循环平铺，只在 4 秒片段中随机放置一次；按事件有效区间而不是整段
+静音 RMS 缩放，SNR 主要为 18-30 dB，峰值不超过语音峰值的 0.8 倍。
+
+### 13.4 smoke audit
+
+500/100/100 smoke 数据和双份同 seed 复现检查均通过：
+
+```text
+train speakers: 25
+train RIR pool: 2502
+valid RIR pool: 1069
+test RIR pool: 792
+train background pool: 271
+train ESC event pool: 288
+
+speaker overlap: 0
+room overlap: 0
+background file overlap: 0
+event file overlap: 0
+minimum speech activity: 0.415
+RT60 range after selection: 0.178-1.500 s
+same-seed WAV hash equality: true
+```
+
+正式生成命令：
+
+```powershell
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python make_classroom_v4_dataset.py `
+  --out-root ..\dataset_classroom_v4\generated `
+  --num-train 20000 --num-valid 1000 --num-test 1000 `
+  --segment-seconds 4 --seed 20260717 --split-seed 20260717
+```
