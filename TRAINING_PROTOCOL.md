@@ -1440,3 +1440,146 @@ D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python make_classr
   --num-train 20000 --num-valid 1000 --num-test 1000 `
   --segment-seconds 4 --seed 20260717 --split-seed 20260717
 ```
+
+### 13.5 正式 classroom_v4 状态
+
+正式生成和 `audit_classroom_dataset.py` 审计已完成：
+
+```text
+dataset: D:\modeltraining\dataset_classroom_v4\generated
+train: 20000 files, 22.22 h
+valid:  1000 files,  1.11 h
+test:   1000 files,  1.11 h
+paired WAV files: 44000
+WAV format: 16 kHz, mono, PCM16, 4 s
+```
+
+训练集实际分布：
+
+```text
+clean:             2031
+reverb_only:       2993
+reverb_noise:     11961
+noise_no_reverb:   2001
+noise_only:        1014
+
+BUT RIR samples:        5414
+RIRS real samples:      2271
+RIRS simulated samples: 7269
+
+MS-SNSD backgrounds:       8296
+PRESTO/PCAFETER:            3747
+RIRS isotropic backgrounds: 1466
+ESC continuous backgrounds: 1467
+ESC foreground events:      1389
+```
+
+训练集实际使用 27 个物理房间、2335 个 RIR、271 个背景噪声文件和 284 个
+ESC 事件文件。背景 SNR 中位数 23.33 dB，事件 SNR 中位数 23.88 dB，RT60
+中位数 0.377 s、范围 0.154-1.500 s。
+
+最终审计：
+
+```text
+speaker train/valid/test overlap: 0
+room overlap:                    0
+background file overlap:         0
+event file overlap:              0
+all WAV file size:               128044 bytes
+sampled WAV decoded:             2000
+bad format/length:               0
+NaN/Inf:                         0
+peak over 0.981:                 0
+silent noisy files:              0
+audit passed:                    true
+```
+
+审计结果保存在：
+
+```text
+D:\modeltraining\dataset_classroom_v4\generated\metadata\audit.json
+```
+
+训练前试听目录：
+
+```text
+D:\modeltraining\dataset_classroom_v4\listening_samples
+```
+
+其中包含 clean、三种 RIR 来源、四种背景来源、door knock、footsteps、keyboard
+typing 和 noise-only。正式训练前应先按 `manifest.csv` 听完这些输入/目标配对。
+
+### 13.6 4 秒 VoiceBank replay
+
+不能直接对原 VoiceBank 短语句设置 `segment_seconds=4`，否则大量片段会补零。
+因此单独生成同说话人、paired noisy/clean 同步拼接的 replay 数据：
+
+```text
+dataset: D:\modeltraining\dataset_voicebank_replay_v4\generated
+train: 10000 files, 11.11 h
+valid:  1000 files,  1.11 h
+segment: 4 s
+train speakers: 25
+valid speakers: 3
+speaker overlap: 0
+minimum speech activity: 0.4
+```
+
+所有 22000 个 paired WAV 均为 128044 字节；抽样 1000 个文件没有格式、NaN
+或峰值错误。
+
+### 13.7 classroom_v4 训练配置
+
+每轮不遍历全部 20000 条 classroom 数据，而是确定性抽取：
+
+```text
+epoch size: 5000
+classroom_v4: 3750 (75%)
+VoiceBank replay v4: 1250 (25%)
+segment: 4 s
+batch size: 4
+optimizer steps per epoch: 1250
+audio per batch: 16 s
+audio per epoch: 5.56 h
+```
+
+这与 v3 的 `10000 x 2 s, batch 8` 保持相同的每 batch 音频长度和每 epoch
+更新次数。模型从 `classroom_replay_v3/best.tar` 初始化，新建优化器，最大 LR
+降低到 `5e-5`，综合验证连续 6 轮不改善时自动停止。
+
+32 条联合训练、两边各 8 条验证的 CUDA smoke 已通过：
+
+```text
+train loss:           0.4928
+classroom valid:      1.9855
+VoiceBank valid:      1.4899
+selection loss:       1.8616
+checkpoint fields:    valid
+```
+
+PowerShell 正式训练命令：
+
+```powershell
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py `
+  --train-noisy ..\dataset_classroom_v4\generated\train\noisy `
+  --train-clean ..\dataset_classroom_v4\generated\train\clean `
+  --valid-noisy ..\dataset_classroom_v4\generated\valid\noisy `
+  --valid-clean ..\dataset_classroom_v4\generated\valid\clean `
+  --train-manifest ..\dataset_classroom_v4\generated\metadata\train.json `
+  --valid-manifest ..\dataset_classroom_v4\generated\metadata\valid.json `
+  --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy `
+  --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean `
+  --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json `
+  --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy `
+  --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean `
+  --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json `
+  --replay-fraction 0.25 --epoch-size 5000 `
+  --segment-seconds 4 `
+  --out-dir runs\classroom_v4 `
+  --epochs 30 --batch-size 4 --lr 5e-5 `
+  --scheduler warmup_cosine --warmup-epochs 3 `
+  --warmup-start-lr 1e-6 --min-lr 5e-6 `
+  --num-workers 4 --seed 20260717 `
+  --early-stopping-patience 6 `
+  --init-checkpoint runs\classroom_replay_v3\checkpoints\best.tar
+```

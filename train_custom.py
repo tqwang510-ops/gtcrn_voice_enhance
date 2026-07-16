@@ -254,6 +254,7 @@ def save_checkpoint(
     valid_loss,
     best_loss,
     validation_metrics=None,
+    epochs_without_improvement=0,
 ):
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -264,6 +265,7 @@ def save_checkpoint(
             "valid_loss": valid_loss,
             "best_loss": best_loss,
             "validation_metrics": validation_metrics or {"valid_loss": valid_loss},
+            "epochs_without_improvement": epochs_without_improvement,
             "config": checkpoint_config(args),
             "training_config": vars(args),
         },
@@ -390,6 +392,7 @@ def main():
     parser.add_argument("--resume", default="")
     parser.add_argument("--init-checkpoint", default="")
     parser.add_argument("--overwrite-run", action="store_true")
+    parser.add_argument("--early-stopping-patience", type=int, default=0)
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -522,6 +525,7 @@ def main():
 
     start_epoch = 1
     best_loss = float("inf")
+    epochs_without_improvement = 0
     history = []
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device)
@@ -538,6 +542,7 @@ def main():
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_epoch = int(checkpoint["epoch"]) + 1
         best_loss = float(checkpoint.get("best_loss", checkpoint.get("valid_loss", best_loss)))
+        epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
         history = [
             row for row in load_history(metrics_path) if int(row["epoch"]) < start_epoch
         ]
@@ -619,6 +624,9 @@ def main():
         is_best = valid_loss < best_loss
         if is_best:
             best_loss = valid_loss
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
         row = {
             "epoch": epoch,
             "train_loss": f"{train_loss:.8f}",
@@ -652,6 +660,7 @@ def main():
             valid_loss,
             best_loss,
             validation_metrics,
+            epochs_without_improvement,
         )
         if is_best:
             save_checkpoint(
@@ -663,6 +672,7 @@ def main():
                 valid_loss,
                 best_loss,
                 validation_metrics,
+                epochs_without_improvement,
             )
 
         if replay_valid_loss is None:
@@ -679,6 +689,15 @@ def main():
         )
         if is_best:
             print(f"saved best checkpoint: valid_loss={best_loss:.4f}")
+        if (
+            args.early_stopping_patience > 0
+            and epochs_without_improvement >= args.early_stopping_patience
+        ):
+            print(
+                f"early stopping after {epochs_without_improvement} epochs "
+                "without validation improvement"
+            )
+            break
 
 
 if __name__ == "__main__":
