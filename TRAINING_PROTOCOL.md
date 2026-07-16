@@ -1227,3 +1227,103 @@ python train_custom.py --train-noisy ..\dataset_classroom_v2\generated\train\noi
 
 这里必须使用 `--resume`，因为需要连同第 2 轮的优化器、学习率进度和历史记录
 继续；不要再使用 `--init-checkpoint`，否则会从 epoch 1 重新开始一个新优化器。
+
+### 12.13 classroom_replay_v3 正式结果（2026-07-16）
+
+训练完成 30 epoch。按 75% classroom valid loss + 25% VoiceBank valid loss
+选择出的最佳 checkpoint 为：
+
+```text
+checkpoint:                runs\classroom_replay_v3\checkpoints\best.tar
+best epoch:                11
+30-epoch training time:    1.51 h
+best classroom valid:      2.33713494
+best VoiceBank valid:      2.05472725
+best weighted selection:   2.26653302
+```
+
+训练 loss 最后约为 2.22，但正式使用 `best.tar`，不使用 epoch 30 的 `last.tar`。
+
+#### 12.13.1 两域正式测试
+
+教室测试使用未见房间的 1000 条 `classroom_v2/test`。语音指标只统计 842 条
+非 clean、非 noise-only 场景；103 条 clean 和 55 条 noise-only 分开报告。
+
+```text
+model                 test set    SI-SNR gain  PESQ gain  STOI gain
+VoiceBank baseline    VoiceBank      +9.3321     +0.6655    +0.0152
+classroom_v2          VoiceBank      +1.6911     +0.3620    +0.0042
+classroom_replay_v3   VoiceBank      +6.9098     +0.6020    +0.0070
+
+VoiceBank baseline    classroom      -0.2541     +0.1651    -0.0379
+classroom_v2          classroom      +1.3437     +0.3774    +0.0338
+classroom_replay_v3   classroom      +1.2345     +0.3831    +0.0301
+```
+
+教室补充指标：
+
+```text
+metric                         classroom_v2   classroom_replay_v3
+improved file fraction             90.97%             87.65%
+noise-only attenuation             25.919 dB          24.091 dB
+clean enhanced SI-SNR              75.147 dB          73.392 dB
+clean PESQ change                  -0.0162            -0.0129
+clean STOI change                  -0.0002            -0.0003
+```
+
+结论：25% replay 明显缓解了灾难性遗忘。VoiceBank SI-SNR 恢复了约 5.22 dB，
+同时教室 SI-SNR 只下降约 0.11 dB，教室 PESQ 略有提高。`classroom_replay_v3`
+应作为当前默认通用 checkpoint；如果部署永远只面对当前合成教室分布并且更重视
+纯噪声衰减，可以保留 `classroom_v2` 作为专用对照模型。
+
+正式评估输出：
+
+```text
+runs\classroom_replay_v3\evaluation_classroom_filtered
+runs\classroom_replay_v3\evaluation_voicebank
+```
+
+`evaluate_custom.py` 已增加 `--metadata-csv`。存在场景元数据时，它会把 clean、
+noise-only 和真实增强语音分开统计，并保证 `worst_improvements` 只从实际增强
+场景选择，避免 clean passthrough 的极高输入 SI-SNR 污染均值和失败样本排序。
+
+#### 12.13.2 试听
+
+典型教室场景 A/B 目录：
+
+```text
+runs\classroom_replay_v3\listening_ab
+```
+
+共 6 组，每组按文件名中的编号依次试听：
+
+```text
+01_noisy              原始带噪/混响输入
+02_v2_enhanced        只用教室数据微调的模型
+03_v3_replay_enhanced 加入 25% VoiceBank replay 的模型
+04_clean              训练目标参考
+```
+
+其中 `test_000946/test_000778` 为典型 reverb_noise，
+`test_000380/test_000568` 为典型 reverb_only，
+`test_000590/test_000971` 为典型 noise_no_reverb。
+
+不要只听典型样本，还必须检查真实失败案例：
+
+```text
+runs\classroom_replay_v3\evaluation_classroom_filtered\worst_improvements
+```
+
+#### 12.13.3 下一步执行顺序
+
+1. 冻结并备份当前 `best.tar`，停止继续调整合成训练参数。
+2. 在目标教室采集一批真实录音，至少覆盖安静、风扇/设备、桌椅移动、远近说话、
+   空教室纯噪声；记录麦克风、扬声器、距离和增益设置。
+3. 对真实录音做 `noisy -> enhanced` 盲听。能获得同步干净参考的样本再计算
+   SI-SNR/PESQ/STOI，普通现场讲话主要依靠盲听、语音可懂度和伪影记录。
+4. 用实际部署的分块大小运行流式推理，对比离线输出，测量端到端延迟、块边界伪影
+   和实时系数。当前模型使用 `center=true`，不能直接把离线结果当作实时结果。
+5. 只有真实测试暴露出稳定问题后再训练下一版：通用噪声仍不足可比较 35% replay；
+   教室效果下降明显可比较 15%；实时前视不可接受时再单独训练 `center=false` 版本。
+
+下一阶段的首要工作是“真实教室验收 + 流式一致性测试”，不是立即扩大合成数据集。

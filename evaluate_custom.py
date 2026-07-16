@@ -42,6 +42,7 @@ def save_json(path, data):
 
 METRIC_FIELDS = [
     "file",
+    "scene_type",
     "seconds",
     "clean_rms_dbfs",
     "input_rms_dbfs",
@@ -95,6 +96,11 @@ def main():
     parser.add_argument("--noisy-dir", required=True)
     parser.add_argument("--clean-dir", required=True)
     parser.add_argument("--manifest", default="")
+    parser.add_argument(
+        "--metadata-csv",
+        default="",
+        help="Optional scene metadata with file and scene_type columns.",
+    )
     parser.add_argument("--out-dir", default="evaluation")
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--max-files", type=int, default=0)
@@ -130,6 +136,12 @@ def main():
     if not names:
         raise ValueError("No evaluation wav files found")
 
+    scene_types = {}
+    if args.metadata_csv:
+        with open(args.metadata_csv, "r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                scene_types[row["file"]] = row.get("scene_type", "")
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = out_dir / "metrics.csv"
@@ -156,6 +168,7 @@ def main():
                 enhanced_level = rms_dbfs(enhanced)
                 common = {
                     "file": name,
+                    "scene_type": scene_types.get(name, ""),
                     "seconds": length / fs,
                     "clean_rms_dbfs": clean_level,
                     "input_rms_dbfs": input_level,
@@ -199,6 +212,7 @@ def main():
             except Exception as exc:
                 row = {
                     "file": name,
+                    "scene_type": scene_types.get(name, ""),
                     "seconds": "",
                     "clean_rms_dbfs": "",
                     "input_rms_dbfs": "",
@@ -221,24 +235,39 @@ def main():
             if index % 50 == 0 or index == len(names):
                 print(f"evaluated {index}/{len(names)}")
 
-    valid_rows = [
-        row
-        for row in rows
-        if not row["error"] and row["clean_rms_dbfs"] >= -50.0
-    ]
-    noise_only_rows = [
-        row
-        for row in rows
-        if not row["error"] and row["clean_rms_dbfs"] < -50.0
-    ]
+    successful_rows = [row for row in rows if not row["error"]]
+    if args.metadata_csv:
+        valid_rows = [
+            row
+            for row in successful_rows
+            if row["scene_type"] not in {"clean", "noise_only"}
+            and row["clean_rms_dbfs"] >= -50.0
+        ]
+        noise_only_rows = [
+            row for row in successful_rows if row["scene_type"] == "noise_only"
+        ]
+        clean_rows = [row for row in successful_rows if row["scene_type"] == "clean"]
+    else:
+        valid_rows = [
+            row for row in successful_rows if row["clean_rms_dbfs"] >= -50.0
+        ]
+        noise_only_rows = [
+            row for row in successful_rows if row["clean_rms_dbfs"] < -50.0
+        ]
+        clean_rows = []
+    if not valid_rows:
+        raise ValueError("No valid speech rows available for summary metrics")
     improvements = np.array([row["si_snr_improvement_db"] for row in valid_rows])
     summary = {
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "checkpoint_epoch": checkpoint.get("epoch"),
+        "metadata_csv": str(Path(args.metadata_csv).resolve()) if args.metadata_csv else None,
+        "excluded_speech_scenes": ["clean", "noise_only"] if args.metadata_csv else [],
         "files": len(rows),
         "files_used_for_summary": len(valid_rows),
         "speech_files": len(valid_rows),
         "noise_only_files": len(noise_only_rows),
+        "clean_passthrough_files": len(clean_rows),
         "mean_input_si_snr_db": float(np.mean([row["input_si_snr_db"] for row in valid_rows])),
         "mean_enhanced_si_snr_db": float(
             np.mean([row["enhanced_si_snr_db"] for row in valid_rows])
@@ -274,6 +303,21 @@ def main():
         "mean_noise_attenuation_db": (
             float(np.mean([row["noise_attenuation_db"] for row in noise_only_rows]))
             if noise_only_rows
+            else None
+        ),
+        "mean_clean_enhanced_si_snr_db": (
+            float(np.mean([row["enhanced_si_snr_db"] for row in clean_rows]))
+            if clean_rows
+            else None
+        ),
+        "mean_clean_pesq_improvement": (
+            float(np.mean([row["pesq_improvement"] for row in clean_rows]))
+            if clean_rows
+            else None
+        ),
+        "mean_clean_stoi_improvement": (
+            float(np.mean([row["stoi_improvement"] for row in clean_rows]))
+            if clean_rows
             else None
         ),
         "config": config,
