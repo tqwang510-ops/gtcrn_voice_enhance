@@ -1583,3 +1583,130 @@ D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custo
   --early-stopping-patience 6 `
   --init-checkpoint runs\classroom_replay_v3\checkpoints\best.tar
 ```
+
+### 13.8 classroom_v4 正式训练与评估（2026-07-16）
+
+训练在 epoch 18 触发 early stopping，累计 26.70 分钟。正式模型不是 epoch 18
+的 `last.tar`，而是综合验证最好的 epoch 12：
+
+```text
+checkpoint:               runs\classroom_v4\checkpoints\best.tar
+best epoch:               12
+classroom valid loss:     0.83932108
+VoiceBank replay loss:    2.06536637
+weighted selection loss:  1.14583240
+
+stopped epoch:            18
+stopped selection loss:   1.22668256
+epochs without improve:   6
+```
+
+epoch 18 的 train loss 继续下降到 1.1981，但验证结果没有超过 epoch 12，说明继续
+拟合训练样本不会得到更好的双域模型。不能从 `last.tar` 继续训练来规避 early stopping。
+
+#### 13.8.1 新 classroom_v4 未见房间测试
+
+同一 1000 条 v4 test 上公平比较旧 v3 与新 v4：
+
+```text
+model   SI-SNR gain  PESQ gain  STOI gain  improved  noise attenuation
+v3        +0.5586      +0.3545    +0.0146    73.34%       20.022 dB
+v4        +0.8798      +0.4379    +0.0218    80.68%       21.007 dB
+```
+
+v4 在新的普通教室尺寸、多来源 RIR、MS-SNSD 和 ESC 分布上有一致提升，证明 4 秒
+数据重构有效，不只是验证 loss 数字变小。
+
+但是 clean passthrough 明显退化：
+
+```text
+model   clean enhanced SI-SNR  clean PESQ change  clean STOI change
+v3             76.616 dB            -0.0080            -0.0001
+v4             49.617 dB            -0.1217            -0.0037
+```
+
+49.6 dB SI-SNR 仍然很高，但 PESQ/STOI 表明 clean 输入的频谱细节被不必要地修改。
+
+#### 13.8.2 旧 classroom_v2 测试
+
+```text
+model   SI-SNR gain  PESQ gain  STOI gain  improved  noise attenuation
+v3        +1.2345      +0.3831    +0.0301    87.65%       24.091 dB
+v4        +1.1458      +0.3814    +0.0317    84.32%       20.909 dB
+```
+
+旧域语音增强总体保持，STOI 略升，但 SI-SNR、改善比例和纯噪声衰减小幅下降。
+旧域 clean PESQ change 从 v3 的 -0.0129 变为 v4 的 -0.1994，确认透明度问题
+不是新测试集偶然现象。
+
+#### 13.8.3 VoiceBank 官方测试
+
+```text
+model   SI-SNR gain  PESQ gain  STOI gain  improved
+v3        +6.9098      +0.6020    +0.0070    99.88%
+v4        +6.6594      +0.6478    +0.0093   100.00%
+```
+
+VoiceBank 没有明显灾难性遗忘。SI-SNR 小幅下降 0.25 dB，但 PESQ/STOI 提升，
+说明 4 秒 replay 构造和 25% replay 比例总体有效。
+
+正式评估目录：
+
+```text
+runs\classroom_v4\evaluation_v4_test
+runs\classroom_v4\evaluation_v3_on_v4_test
+runs\classroom_v4\evaluation_v2_test
+runs\classroom_v4\evaluation_voicebank
+```
+
+v3/v4 同样本 A/B 试听：
+
+```text
+runs\classroom_v4\listening_ab
+
+01_noisy
+02_v3_enhanced
+03_v4_enhanced
+04_clean
+```
+
+目录同时包含 clean 和 noise-only，必须重点比较 `00_clean`，不能只听带噪样本。
+
+#### 13.8.4 下一步：透明度修复，不继续扩大数据
+
+当前不把 v4 直接替换为生产默认模型。v3 仍是 clean 透明度更安全的 checkpoint，
+v4 是新复杂教室分布上更强的候选模型。
+
+下一实验应从 `classroom_v4/best.tar` 做短程 identity repair，而不是重建 v5 数据：
+
+```text
+60% classroom_v4 non-clean enhancement scenes
+15% classroom_v4 clean passthrough
+25% VoiceBank replay v4
+
+max epochs: 8
+learning rate: 1e-5
+early stopping patience: 3
+```
+
+训练脚本需要先增加 scene-aware sampling 和第三套 clean identity validation。
+checkpoint selection 建议：
+
+```text
+0.60 * classroom enhancement valid loss
++ 0.25 * VoiceBank valid loss
++ 0.15 * clean identity valid loss
+```
+
+修复模型的接受门槛：
+
+```text
+v4 test SI-SNR gain >= 0.80 dB
+v4 test PESQ gain >= 0.42
+VoiceBank PESQ gain >= 0.62
+clean PESQ change >= -0.03 on both classroom tests
+old classroom noise attenuation >= 22 dB
+```
+
+达到这些门槛后再进行真实教室和流式 `center` 验收。未达到时保留 v3 作为默认，
+不要因为 v4 在新合成测试上更强就忽略 clean 语音失真。

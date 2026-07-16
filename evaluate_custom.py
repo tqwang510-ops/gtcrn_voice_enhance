@@ -28,7 +28,7 @@ def read_wav_for_eval(path, expected_fs):
 def load_manifest(path):
     if not path:
         return None
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, "r", encoding="utf-8-sig") as handle:
         data = json.load(handle)
     return data.get("files", data) if isinstance(data, dict) else data
 
