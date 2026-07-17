@@ -2008,3 +2008,146 @@ D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custo
 训练结束后先检查是否存在 `checkpoints/best.tar`。存在才进入完整测试矩阵；不
 存在则 v2 仍失败，但所有 epoch 已保留，可以分析最接近门槛的具体 checkpoint，
 不再重复 v1 丢失 epoch 7 的问题。
+
+### 16.4 正式训练结果（2026-07-17）
+
+v2 完成全部 8 个 epoch，总耗时 3929.3 秒（约 65.5 分钟）。冻结 BatchNorm 后
+训练完全稳定，8 个 epoch 全部通过 clean-valid 三条 hard gate。按训练期
+selection loss 选择的 `best.tar` 为 epoch 7：
+
+```text
+epoch  clean SI-SNR  PESQ change  STOI change  gate  selection loss
+1        88.704 dB     -0.01145     -0.000127   pass      0.02725
+2        92.464 dB     -0.00911     -0.000111   pass     -0.02625
+3        95.506 dB     -0.01021     -0.000112   pass     -0.06637
+4        96.995 dB     -0.00851     -0.000099   pass     -0.08699
+5        95.154 dB     -0.01182     -0.000146   pass     -0.06280
+6        94.768 dB     -0.00925     -0.000147   pass     -0.06613
+7        98.466 dB     -0.01253     -0.000141   pass     -0.09870  <- best.tar
+8        97.003 dB     -0.00994     -0.000151   pass     -0.09665
+```
+
+该结果确认 15.5 的判断：v1 的主要振荡来自 BatchNorm running statistics
+漂移，`--freeze-batchnorm` 有效。但 clean-valid 通过只是进入测试矩阵的必要
+条件，不等于最终模型已经被接受。
+
+### 16.5 epoch 7 完整测试矩阵
+
+新 classroom_v4 未见房间测试：
+
+```text
+model    SI-SNR gain  PESQ gain  STOI gain  improved  noise attenuation
+v3         +0.5586      +0.3545    +0.0146    73.34%       20.022 dB
+v4         +0.8798      +0.4379    +0.0218    80.68%       21.007 dB
+repair     +0.9676      +0.3977    +0.0200    83.82%       23.669 dB
+
+model    clean SI-SNR  clean PESQ change  clean STOI change
+v3         76.616 dB        -0.0080            -0.0001
+v4         49.617 dB        -0.1217            -0.0037
+repair    101.568 dB        -0.0058            -0.0001
+```
+
+旧 classroom_v2 测试：
+
+```text
+model    SI-SNR gain  PESQ gain  STOI gain  improved  noise attenuation
+v3         +1.2345      +0.3831    +0.0301    87.65%       24.091 dB
+v4         +1.1458      +0.3814    +0.0317    84.32%       20.909 dB
+repair     +1.1102      +0.3509    +0.0274    83.49%       23.244 dB
+
+model    clean SI-SNR  clean PESQ change  clean STOI change
+v3         73.392 dB        -0.0129            -0.0003
+v4         42.366 dB        -0.1994            -0.0046
+repair     82.854 dB        -0.0547            -0.0013
+```
+
+VoiceBank 官方测试：
+
+```text
+model    SI-SNR gain  PESQ gain  STOI gain  improved
+v3         +6.9098      +0.6020    +0.0070    99.88%
+v4         +6.6594      +0.6478    +0.0093   100.00%
+repair     +6.3406      +0.5666    +0.0086    99.76%
+```
+
+预设接受门槛逐项判断：
+
+```text
+v4 test SI-SNR gain >= 0.80 dB:          pass (0.9676)
+v4 test PESQ gain >= 0.42:               FAIL (0.3977)
+VoiceBank PESQ gain >= 0.62:             FAIL (0.5666)
+v4 test clean PESQ change >= -0.03:      pass (-0.0058)
+v2 test clean PESQ change >= -0.03:      FAIL (-0.0547)
+old classroom noise attenuation >=22 dB: pass (23.244)
+```
+
+因此 epoch 7 是透明度很好的诊断模型，但没有通过综合接受协议，不能替换 v3
+作为默认模型。它提高了 SI-SNR、改善比例和 noise-only 衰减，却牺牲了 PESQ、
+STOI 和 VoiceBank 泛化；不能只看 clean SI-SNR 约 100 dB 就宣布成功。
+
+### 16.6 checkpoint 选择复核与消融
+
+epoch 1 已经通过全部 clean-valid hard gate，理论上是改动最小的候选。额外运行
+完整 v4 test 后：
+
+```text
+epoch 1: SI-SNR +0.9040, PESQ +0.3894, STOI +0.0186,
+         noise attenuation 22.588 dB, clean PESQ change -0.0038
+```
+
+它同样未达到 v4 PESQ `>=0.42`，而且 PESQ 比 epoch 7 更低。因此失败不只是
+“selection loss 错选了过度 repair 的 epoch 7”；模型一开始满足 identity 后，
+增强 PESQ 已经发生回退。
+
+把辅助 `identity_loss_weight` 从 0.1 降到 0.02 的 200 条/epoch 小消融中，clean
+SI-SNR 仍按 `63.79 -> 71.59 -> 76.57 -> 80.42 dB` 快速上升，与 0.1 权重结果
+接近。说明主要 identity 梯度来自 15% clean 场景上的基础 HybridLoss，而不只是
+低能量辅助项。继续微调辅助权重不能解决多目标冲突；再试 clean 比例会进入缺少
+真实数据约束的配方循环，当前停止。
+
+### 16.7 试听目录
+
+已在相同 12 组样本上生成五列对照：
+
+```text
+runs/classroom_v4_identity_repair_v2_frozen_bn/listening_ab/
+
+01_noisy
+02_v3_enhanced
+03_v4_enhanced
+04_repair_enhanced
+05_clean
+```
+
+覆盖 clean、三类 RIR、MS-SNSD、PRESTO/PCAFETER、isotropic noise、ESC、敲门、
+脚步、键盘和 noise-only。repair 可用于理解“透明度换增强质量”的听感，但由于
+客观接受门槛失败，盲听偏好不能单独推翻完整矩阵。
+
+### 16.8 项目决策与下一阶段
+
+停止继续构造 synthetic identity repair v3。当前模型角色固定为：
+
+```text
+默认/保守模型: classroom_replay_v3/best.tar
+  clean 透明度、旧 classroom、VoiceBank 综合最稳
+
+新噪声分布候选: classroom_v4/best.tar
+  v4 新教室 PESQ/STOI 最强，但 clean 透明度不合格
+
+诊断模型: classroom_v4_identity_repair_v2_frozen_bn/best.tar
+  clean 与 noise-only 很强，但综合 PESQ/泛化未通过，不用于默认部署
+```
+
+下一阶段不再训练合成模型，转入真实教室和流式验收：
+
+```text
+1. 用最终硬件和麦克风位置采集真实教室录音，保留未经处理的原始 wav。
+2. 至少覆盖：安静讲话、空调/风扇、远距离讲话、多人活动、桌椅/脚步/键盘、
+   noise-only；包含中文男声/女声和不同说话人。
+3. 同一录音离线输出 v3/v4/repair，做不知道模型名称的 A/B/C 盲听。
+4. 记录“语音自然度、噪声残留、混响、弱音/停顿是否被吞、事件声音是否突兀”。
+5. 真实数据确认模型方向后，再做 center=true 离线结果与流式缓存输出的一致性、
+   端到端延迟和扬声器泄漏/反馈测试。
+```
+
+真实验收以前不宣布 v4 或 repair 为生产模型，也不再根据合成分数继续调数据比例。
