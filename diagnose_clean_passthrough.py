@@ -238,7 +238,7 @@ def plot_correlation(per_model_results, meta, key, xlabel, out_path):
         xs = np.array([meta[r["file"]][key] for r in results], dtype=float)
         ys = np.array([r["si_snr_db"] for r in results])
         ax.scatter(xs, ys, s=10, alpha=0.6)
-        if xs.size > 2:
+        if xs.size > 2 and np.ptp(xs) > 0.0:
             slope, intercept = np.polyfit(xs, ys, 1)
             grid = np.linspace(xs.min(), xs.max(), 50)
             ax.plot(grid, slope * grid + intercept, color="red", linewidth=1)
@@ -249,6 +249,15 @@ def plot_correlation(per_model_results, meta, key, xlabel, out_path):
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
+
+
+def correlation_summary(x, y):
+    if len(x) < 3 or np.ptp(x) == 0.0 or np.ptp(y) == 0.0:
+        return {"pearson_r": None, "spearman_r": None}
+    return {
+        "pearson_r": float(pearsonr(x, y)[0]),
+        "spearman_r": float(spearmanr(x, y)[0]),
+    }
 
 
 def plot_group_attenuation(per_model_results, out_path):
@@ -327,7 +336,7 @@ def main():
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     meta = {}
-    with open(args.metadata_csv, "r", encoding="utf-8", newline="") as handle:
+    with open(args.metadata_csv, "r", encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             if row.get("scene_type") == args.scene_type:
                 meta[row["file"]] = {
@@ -505,14 +514,12 @@ def main():
                 )
                 for band in BAND_NAMES
             },
-            "corr_si_snr_vs_speech_activity": {
-                "pearson_r": float(pearsonr(activity, si_snr_values)[0]),
-                "spearman_r": float(spearmanr(activity, si_snr_values)[0]),
-            },
-            "corr_si_snr_vs_noisy_dbfs": {
-                "pearson_r": float(pearsonr(loudness, si_snr_values)[0]),
-                "spearman_r": float(spearmanr(loudness, si_snr_values)[0]),
-            },
+            "corr_si_snr_vs_speech_activity": correlation_summary(
+                activity, si_snr_values
+            ),
+            "corr_si_snr_vs_noisy_dbfs": correlation_summary(
+                loudness, si_snr_values
+            ),
         }
         analysis["models"][label] = model_summary
 

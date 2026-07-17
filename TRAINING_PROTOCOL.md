@@ -2151,3 +2151,153 @@ runs/classroom_v4_identity_repair_v2_frozen_bn/listening_ab/
 ```
 
 真实验收以前不宣布 v4 或 repair 为生产模型，也不再根据合成分数继续调数据比例。
+
+## 17. 无真实录音条件下的中文域补强（AISHELL-1）
+
+### 17.1 前提变化
+
+用户当前没有最终教室、麦克风安装位置和录音条件，无法执行 16.8 的真实录音
+验收。因此项目不再声称已经覆盖真实教室分布；下一阶段改为补强当前最明确且可
+验证的缺口：中文、更多说话人和低电平远距离语音。合成结果仍不能替代未来真实
+硬件验收。
+
+用户试听 AISHELL 原音后指出它并非绝对干声，带有轻微房间/混响感。该听感作为
+数据定义约束：AISHELL 原音标记为 `native_room`，而不是 `dry_clean`。
+
+### 17.2 批量解压工具与结果（2026-07-17）
+
+新增脚本：`extract_aishell_archives.py`。源数据是 400 个按说话人拆分的
+`Sxxxx.tar.gz`，脚本提供：
+
+```text
+tar member 路径穿越、链接和设备文件拒绝
+每个归档解压后逐文件存在性与字节数校验
+.extract_state/*.done.json 完成标记和 extract_log.jsonl
+中断后重复运行时校验并跳过已完成包
+--dry-run / --max-archives
+--delete-archives-after-success（必须显式提供，默认绝不删除原包）
+每包解压前剩余空间检查
+```
+
+正式命令：
+
+```cmd
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python extract_aishell_archives.py --source-dir ..\dataset\data_aishell\wav --output-dir ..\dataset\data_aishell\wav_extracted
+```
+
+本机已完成全量解压且保留压缩包：
+
+```text
+archives:             400/400 verified
+wav files:            141925
+uncompressed size:    19.251 GiB
+estimated duration:   179.38 hours
+format sample audit:  1000/1000 = 16 kHz, mono, PCM16
+
+split   speakers  wav files
+train      340      120418
+dev         40       14331
+test        20        7176
+```
+
+官方 train/dev/test 已按说话人隔离，后续必须原样使用，禁止把同一 speaker 重新
+随机分到不同集合。转写文件包含 141600 个 utterance id；325 个 WAV 无对应转写。
+语音增强本身不使用文本，但生成清单默认排除这 325 条并记录原因。
+
+当前下载包没有 `speaker.info` 或 gender metadata。400 位说话人能够提供明显高于
+VoiceBank 25 人的多样性，也自然应包含男女声，但在获得官方 speaker metadata
+前不能声称男女比例已被精确平衡；不使用基频自动猜性别作为正式标签。
+
+### 17.3 中文 clean 零样本基线
+
+从 AISHELL 官方 test 的 20 位未见说话人各取 5 条，共 100 条，分别测试原始
+响度和统一缩放到 -25 dBFS 两种 clean passthrough。原始样本响度：
+
+```text
+mean -34.13 dBFS, range -43.28 to -24.88 dBFS
+```
+
+原始响度结果：
+
+```text
+model    clean SI-SNR  PESQ-WB  STOI    overall gain
+v3          10.11 dB     2.363   0.906    -2.05 dB
+v4           7.92 dB     2.407   0.882    -3.88 dB
+repair       6.95 dB     2.178   0.827    -3.69 dB
+```
+
+统一到 -25 dBFS 后：
+
+```text
+model    clean SI-SNR  PESQ-WB  STOI    overall gain
+v3          12.15 dB     2.559   0.940    -1.61 dB
+v4          13.73 dB     3.064   0.952    -1.32 dB
+repair      13.69 dB     2.864   0.948    -1.16 dB
+```
+
+响度归一化有明显帮助，但三个模型仍远未达到透明透传，证明缺口不只是低电平，
+还包含中文说话人/发音结构、录音设备和 AISHELL 原生房间声。此前英语 clean
+约 50-100 dB 的 SI-SNR 不能代表中文透明度。基线输出目录：
+
+```text
+runs/aishell_clean_baseline/
+runs/aishell_clean_baseline_normalized/
+```
+
+### 17.4 classroom_v5_chinese 的目标定义
+
+新数据不是把 AISHELL “去混响成干声”，因为不存在对应的真实干声参考：
+
+```text
+target = AISHELL 原始 native_room 语音（只做必要的响度缩放/裁剪）
+input  = 同一语音 + 受控新增噪声/事件/额外短房间效应
+```
+
+基本原则：
+
+```text
+1. clean identity: input == target，必须保留原生轻微房间感。
+2. additive noise: target 不变，只给 input 加空调/办公室/持续背景。
+3. far speech: 语音分量与 target 同步降低电平；模型负责降噪，不负责把远距离
+   人声恢复成不存在的近讲响度，最终扩声增益属于后级系统。
+4. extra reverb: AISHELL 已有房间感，只使用普通教室短 RIR，建议 RT60
+   0.15-0.55 s，并限制 wet mix；不再叠加强长尾 RIR。
+5. events: 桌椅、脚步、键盘、敲门只出现一次，事件 SNR 以不遮住语音为主。
+6. noise-only: target 为零，但比例保持小，避免重新教出过度噪声门。
+```
+
+计划先生成 `8000/800/800` 条 4 秒 paired WAV，控制磁盘占用，不直接复制全部
+179 小时。建议场景分布的起始值：
+
+```text
+10% native_room identity（其中一半保留较低原始电平）
+25% air-conditioner / office / fan-like additive noise
+30% mild far-distance + short classroom RIR + quiet background
+15% desk/chair/footstep/keyboard/door events
+15% additive noise without extra RIR
+ 5% noise-only
+```
+
+背景 SNR 仍以 `18-32 dB` 为主，少量覆盖 `12-18 dB`。空调优先使用
+MS-SNSD `AirConditioner`，风扇/设备持续声主要来自 OOFFICE；桌椅和键盘可用
+MS-SNSD `SqueakyChair/Typing`，脚步/敲门沿用已筛选 ESC-50 事件。
+
+### 17.5 执行顺序
+
+下一步不直接训练，按以下顺序实现：
+
+```text
+Step 1: 新建 make_classroom_v5_chinese_dataset.py，读取官方 train/dev/test，
+        排除无转写项并记录 native_room、speaker、source level、added RIR/noise/event。
+Step 2: 生成 200/40/40 smoke 数据，试听 identity、低电平、短 RIR、事件和
+        noise-only，确认没有把 AISHELL 原生房间声当作要删除的目标。
+Step 3: 同 seed 生成两份 5/3/3 并做 WAV hash 复现检查。
+Step 4: 生成 8000/800/800 正式中文数据并审计 speaker/RIR/noise 泄漏。
+Step 5: 扩展训练验证为至少四域：中文 noisy、中文 raw/normalized clean、
+        classroom_v4 non-clean、VoiceBank；所有域设置硬门槛并逐 epoch 保存。
+Step 6: 先跑短 smoke fine-tune，再由用户终端运行正式训练。
+Step 7: 完整评估中文 test、v4/v2 classroom、VoiceBank 和现有试听矩阵。
+```
+
+初始化 checkpoint 在实现 smoke 后再由对照决定：v3 在原始低电平中文上相对
+更稳，v4 在归一化中文和新 classroom 上更好，当前不能只凭单项指标预先指定。
