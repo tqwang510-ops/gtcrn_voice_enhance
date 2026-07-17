@@ -1432,6 +1432,11 @@ RT60 range after selection: 0.178-1.500 s
 same-seed WAV hash equality: true
 ```
 
+复现检查的规模说明（2026-07-17 补充）：同 seed 双份再生成检查对应根目录
+`dataset_classroom_v4_repro_a/b`，规模为 train 5 / valid 3 / test 3，共 22 个
+配对 WAV，哈希完全一致。该结论只覆盖这个小样本；正式 20000/1000/1000 数据
+没有做过全量双份再生成验证。
+
 正式生成命令：
 
 ```powershell
@@ -1710,3 +1715,201 @@ old classroom noise attenuation >= 22 dB
 
 达到这些门槛后再进行真实教室和流式 `center` 验收。未达到时保留 v3 作为默认，
 不要因为 v4 在新合成测试上更强就忽略 clean 语音失真。
+
+
+## 14. clean 透传失真诊断（2026-07-17）
+
+v4 的 clean passthrough 退化（clean PESQ change -0.12 ~ -0.20、clean enhanced
+SI-SNR 49.6 dB，对比 v3 的约 76.6 dB）在修复前先做结构诊断，避免盲目调整
+clean 比例。诊断结论直接决定 13.8.4 的修复手段选择。
+
+### 14.1 方法
+
+脚本：`gtcrn/diagnose_clean_passthrough.py`。对 v4 test 全部 102 条 clean 样本
+（输入与目标同为干净语音）分别运行 v2/v3/v4 的 `best.tar`，测量：
+
+```text
+逐文件 SI-SNR / PESQ-WB / STOI（enhanced vs clean 参考）
+等效传递函数 M_eff = stft(enhanced) / stft(input)
+  （gtcrn.py 输出即内部 mask 与输入 STFT 的复乘；此处经过 ISTFT 波形
+  往返后重新 STFT，是输出端等效传递函数，不是模型内部原始 mask 的
+  精确还原；对频段/帧衰减诊断无影响）
+0-1 kHz / 1-4 kHz / 4-8 kHz 频段能量增益
+帧衰减 vs 帧能量（帧能量以文件峰值归一，考察峰值下 0-60 dB 范围）
+瞬态帧（正向谱通量前 10%）与稳态帧的衰减差
+失真与 speech_activity、输入响度的相关
+```
+
+输出：`runs/clean_diagnosis_v4_test/`（metrics.csv、analysis.json、plots/、
+worst_spectrograms/ 最差 10 条语谱图）。
+
+### 14.2 结果
+
+102 条 clean 样本均值：
+
+```text
+model  SI-SNR(dB)  PESQ-WB  STOI      voiced 低能量帧 瞬态帧  稳态帧   4-8kHz
+                                          帧衰减  衰减    衰减    衰减    频段增益
+v2     77.0        4.635    0.99989  -0.002  -0.015  -0.001  -0.002  -0.002
+v3     76.6        4.636    0.99991  -0.002  -0.008  -0.001  -0.003  -0.001
+v4     49.6        4.522    0.99630  -0.047  -0.393  -0.023  -0.060  -0.034
+（衰减/增益单位均为 dB；v4 min SI-SNR 20.4 dB，min PESQ 4.17，std 10.3 dB）
+```
+
+主要发现：
+
+```text
+1. 退化发生在 v3→v4。v2/v3 透明度几乎完美，排除“连续微调必然漂移”。
+2. 主导失真是低能量帧压制：峰值下 20-50 dB 的帧平均衰减 -0.39 dB，
+   为 voiced 帧（-0.05 dB）的约 8 倍；散点图显示个别安静帧衰减达 -13 dB，
+   响帧基本不动。模型把噪声门式的“安静→抑制”行为泛化到了 clean 语音的
+   停顿与弱音段。最差样本语谱图可见停顿/弱摩擦段被挖空。
+3. 次要失真是 4-8 kHz 轻微多衰减（约为低频段的 1.5-2 倍），mask 相位误差
+   也集中在 4-8 kHz（0.28° vs 其他频段 ≤0.05°）。
+4. 瞬态帧衰减（-0.023 dB）反而小于稳态帧（-0.060 dB）：本次 clean 语音
+   诊断不支持“ESC 事件导致模型过度压制攻击音”的假设。clean 测试不含
+   真实 ESC 前景事件，不能排除 ESC 数据对训练行为的间接影响；但该假设
+   未获本诊断支持，不作为修复设计依据。
+5. 整体增益 ≈ 1（-0.025 dB），无全频段统一染色，mask identity 偏差小。
+6. 文件级失真与输入响度无相关（r≈-0.01），与 speech_activity 仅弱相关
+   （r≈-0.17）；v4 逐文件方差大，失真不是简单由响度或活动率解释。
+```
+
+### 14.3 首要怀疑原因（尚未隔离证实）
+
+诊断已经证实的是“v4 压制 clean 输入的低能量帧”，但没有直接证明该行为
+由哪个数据或训练因素造成。当前首要怀疑方向：
+
+v4 的 4 秒拼接 clean 样本含 80-300 ms 合成停顿，且 speech_activity 下限
+0.4 意味着最长约 60% 的低能量内容；noise_only 与安静背景场景可能教会
+模型“低能量→接近零输出”。HybridLoss 的频谱 MSE 与 SI-SNR 项都按能量
+加权，响亮帧主导梯度，安静帧上的 identity 约束信号很弱，模型在 clean
+安静段学到压制的代价很低。v2/v3 的 2 秒自然语句停顿短，训练分布未暴露
+该行为。
+
+其他因素（clean 采样占比、noise_only 场景分布、checkpoint 选择方式、4 秒
+片段长度本身）也可能与上述机制共同作用。隔离证实需要受控对比训练（例如
+只改片段拼接方式、其余不变的实验），当前不做：无论根因是哪一个，14.4
+的修复方向（提高 clean identity 约束强度并对低能量帧加权）都相同。
+4 秒片段允许 60% 静音这一点 v2 同样存在（同为 0.4 下限），不能单独解释
+为根因。
+
+### 14.4 对 identity repair 的设计约束
+
+诊断结果映射到修复手段：
+
+```text
+1. 主修复：按计划提高 clean identity 采样占比（13.8.4 的 15%），
+   并采用硬门槛 checkpoint 选择。
+2. 定向修复：clean identity 损失必须对低能量帧显式加权，否则标准
+   HybridLoss 对安静帧约束过弱的问题依旧存在。候选实现：对 clean 样本
+   增加帧能量比惩罚项 mean_t [10*log10(E_out/E_in)]^2，或在对数/压缩域
+   计算 clean identity loss。该惩罚项只能作用于相对文件峰值 -50~-20 dB
+   的有效低能量语音帧，并加 epsilon/clamp 保护：接近零能量的帧上
+   log10(E_out/E_in) 数值不稳定，且不应强迫模型保留数值噪声底。
+   诊断不支持 transient identity 约束（14.2 第 4 点）。
+3. 硬门槛（在 valid 的 clean 子集上计算，不用 test）：
+     clean PESQ change >= -0.03
+     clean STOI change >= -0.001
+     clean enhanced SI-SNR >= 65 dB，且不低于 v3 同验证集结果 10 dB 以上
+   只有过门槛的 epoch 才参与 0.60/0.25/0.15 加权选择；无 epoch 过门槛则
+   本次修复判定失败，退回 v3 为默认模型，不允许选“加权最好但 clean 仍
+   失真”的 checkpoint。
+4. v3 在 valid clean 子集上的基线使用 `diagnose_clean_passthrough.py`
+   测量，结果记录在 14.5。训练命令通过
+   `--clean-gate-reference-si-snr 77.5466` 使用该基线。
+5. HybridLoss 数值随场景符号/量级变化大（SI-SNR 项为 -SI-SNR(dB)/10，
+   clean 样本 loss 为大幅负值），硬门槛不能用“v3 的若干倍 loss”表达，
+   只能用上述客观指标绝对阈值。
+```
+
+repair 训练完成后必须重跑完整矩阵：v4 test、v2 test、VoiceBank 官方测试、
+两个 classroom test 的 clean transparency 与 noise-only attenuation，以及
+v3/v4/repair 三模型同样本 A/B 试听，全部结果记录后再决定是否替换默认模型。
+
+### 14.5 v4 valid clean 基线（2026-07-17）
+
+使用 `dataset_classroom_v4/generated/metadata/valid.csv` 中全部 99 条 clean
+样本，对 v3 和 v4 做同一协议测量：
+
+```text
+model  clean SI-SNR  PESQ change  STOI change  low-energy attenuation
+v3       77.5466 dB    -0.00895     -0.000051       -0.00597 dB
+v4       49.0848 dB    -0.13789     -0.001899       -0.39575 dB
+```
+
+结果目录：
+
+```text
+runs/clean_diagnosis_v4_valid/
+```
+
+因此 SI-SNR 硬门槛不是固定 65 dB，而是：
+
+```text
+max(65, v3 baseline - 10) = max(65, 77.5466 - 10) = 67.5466 dB
+```
+
+## 15. classroom_v4 identity repair v1（待用户正式训练）
+
+### 15.1 已实现的训练行为
+
+`train_custom.py` 已增加以下功能，同时保持旧训练命令兼容：
+
+```text
+scene-aware epoch schedule:
+  60% classroom_v4 非 clean 场景（包含普通增强和 noise_only）
+  15% classroom_v4 clean identity
+  25% VoiceBank replay v4
+
+clean identity loss:
+  只作用于 clean identity 样本
+  只计算目标峰值以下 -50~-20 dB 的有效低能量帧
+  对帧能量增益 dB 的平方进行惩罚
+  epsilon 防止除零，增益限制在 +/-20 dB
+  默认本实验权重 0.1
+
+validation:
+  0.60 * classroom non-clean HybridLoss
+  + 0.25 * VoiceBank replay HybridLoss
+  + 0.15 * clean identity loss
+
+hard gates:
+  clean SI-SNR >= 67.5466 dB
+  clean PESQ change >= -0.03
+  clean STOI change >= -0.001
+```
+
+只有同时通过三条 hard gate 且 selection loss 改善的 epoch 才保存
+`best.tar`。在首次出现合格 epoch 以前不会触发 early stopping；如果 8 个 epoch
+全部不合格，目录中会有 `last.tar` 而没有 `best.tar`，该实验按失败处理并继续使用
+v3。不能手工把未过门槛的 `last.tar` 当成最佳模型。
+
+### 15.2 smoke test
+
+已完成两种最小测试：
+
+```text
+scene-aware repair: 通过，clean gate=fail 时只保存 last.tar
+legacy single-dataset training: 通过，旧命令仍可训练并保存 best.tar
+200 条/epoch 的两轮方向性测试：clean SI-SNR 43.42 -> 44.89 dB，
+  PESQ change -0.1842 -> -0.1834，STOI change -0.00266 -> -0.00239；
+  三项都向改善方向移动，但小样本尚未通过 hard gate
+py_compile: 通过
+git diff --check: 通过
+```
+
+smoke test 只验证程序路径，样本数太少，其指标没有模型质量意义。
+
+### 15.3 正式训练命令（Windows cmd 单行）
+
+在 `D:\modeltraining\gtcrn>` 提示符后粘贴下面完整的一行。不要加入 PowerShell
+反引号，也不要拆成多条命令：
+
+```cmd
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py --train-noisy ..\dataset_classroom_v4\generated\train\noisy --train-clean ..\dataset_classroom_v4\generated\train\clean --valid-noisy ..\dataset_classroom_v4\generated\valid\noisy --valid-clean ..\dataset_classroom_v4\generated\valid\clean --train-metadata-csv ..\dataset_classroom_v4\generated\metadata\train.csv --valid-metadata-csv ..\dataset_classroom_v4\generated\metadata\valid.csv --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json --replay-fraction 0.25 --clean-fraction 0.15 --epoch-size 10000 --out-dir runs\classroom_v4_identity_repair_v1 --segment-seconds 4 --epochs 8 --batch-size 8 --lr 1e-5 --scheduler none --num-workers 4 --identity-loss-weight 0.1 --identity-energy-min-db -50 --identity-energy-max-db -20 --identity-gain-clamp-db 20 --primary-valid-weight 0.60 --replay-valid-weight 0.25 --clean-valid-weight 0.15 --clean-gate-min-si-snr 65 --clean-gate-reference-si-snr 77.5466 --clean-gate-max-si-snr-drop 10 --clean-gate-min-pesq-change -0.03 --clean-gate-min-stoi-change -0.001 --early-stopping-patience 3 --init-checkpoint runs\classroom_v4\checkpoints\best.tar --seed 20260717
+```
+
+训练过程中每个 epoch 会直接显示：classroom/replay/clean validation loss、
+clean SI-SNR、PESQ change、STOI change 和 `clean_gate=pass/fail`。正式训练由用户
+在可见终端中执行；Codex 不在后台代替启动。

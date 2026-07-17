@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from audio_utils import read_wav, rms_dbfs, wav_to_stft
+from audio_utils import read_wav, rms_dbfs, si_snr_db, stft_to_wav, wav_to_stft
 from gtcrn import GTCRN
 from loss import HybridLoss
 
@@ -34,6 +34,21 @@ def load_manifest(path):
     return files
 
 
+def load_scene_files(path, scene_type, invert=False):
+    if not path:
+        raise ValueError("Scene-aware sampling requires a metadata CSV")
+    names = []
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            matches = row.get("scene_type") == scene_type
+            if matches != invert:
+                names.append(row["file"])
+    if not names:
+        relation = "other than" if invert else "equal to"
+        raise ValueError(f"No rows with scene_type {relation} {scene_type} in {path}")
+    return names
+
+
 class PairedWavDataset(Dataset):
     def __init__(
         self,
@@ -48,6 +63,8 @@ class PairedWavDataset(Dataset):
         segment_attempts=10,
         valid_candidates=16,
         max_files=0,
+        files=None,
+        identity=False,
     ):
         self.noisy_dir = Path(noisy_dir)
         self.clean_dir = Path(clean_dir)
@@ -60,12 +77,13 @@ class PairedWavDataset(Dataset):
         self.segment_attempts = segment_attempts
         self.valid_candidates = valid_candidates
 
-        names = load_manifest(manifest)
+        names = list(files) if files is not None else load_manifest(manifest)
         if names is None:
             names = sorted(path.name for path in self.noisy_dir.glob("*.wav"))
         if max_files:
             names = names[:max_files]
         self.noisy_files = [self.noisy_dir / name for name in names]
+        self.identity = identity
         if not self.noisy_files:
             raise ValueError(f"No wav files found in {self.noisy_dir}")
 
@@ -125,7 +143,11 @@ class PairedWavDataset(Dataset):
         noisy, _ = read_wav(noisy_path, self.fs)
         clean, _ = read_wav(clean_path, self.fs)
         noisy, clean = self._crop_or_pad_pair(noisy, clean, index)
-        return torch.from_numpy(noisy), torch.from_numpy(clean)
+        return (
+            torch.from_numpy(noisy),
+            torch.from_numpy(clean),
+            torch.tensor(self.identity, dtype=torch.bool),
+        )
 
 
 class ReplayMixDataset(Dataset):
@@ -173,6 +195,51 @@ class ReplayMixDataset(Dataset):
         return dataset[source_index]
 
 
+class SceneAwareMixDataset(Dataset):
+    def __init__(
+        self,
+        primary,
+        clean_identity,
+        replay,
+        clean_fraction,
+        replay_fraction,
+        seed=42,
+        epoch_size=0,
+    ):
+        if clean_fraction <= 0.0 or replay_fraction <= 0.0:
+            raise ValueError("clean and replay fractions must both be positive")
+        if clean_fraction + replay_fraction >= 1.0:
+            raise ValueError("clean and replay fractions must sum to less than 1")
+        self.datasets = [primary, clean_identity, replay]
+        self.clean_fraction = clean_fraction
+        self.replay_fraction = replay_fraction
+        self.seed = seed
+        self.epoch_size = epoch_size or len(primary)
+        self.schedule = []
+        self.set_epoch(0)
+
+    def __len__(self):
+        return self.epoch_size
+
+    def set_epoch(self, epoch):
+        for dataset in self.datasets:
+            dataset.set_epoch(epoch)
+        rng = random.Random(self.seed + epoch * 1_000_003)
+        clean_count = int(round(self.epoch_size * self.clean_fraction))
+        replay_count = int(round(self.epoch_size * self.replay_fraction))
+        primary_count = self.epoch_size - clean_count - replay_count
+        counts = [primary_count, clean_count, replay_count]
+        self.schedule = []
+        for source, (dataset, count) in enumerate(zip(self.datasets, counts)):
+            indices = ReplayMixDataset._sample_indices(len(dataset), count, rng)
+            self.schedule.extend((source, index) for index in indices)
+        rng.shuffle(self.schedule)
+
+    def __getitem__(self, index):
+        source, source_index = self.schedule[index]
+        return self.datasets[source][source_index]
+
+
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -200,14 +267,44 @@ def set_learning_rate(optimizer, learning_rate):
         group["lr"] = learning_rate
 
 
+def low_energy_identity_loss(enhanced_stft, clean_stft, identity, args):
+    identity = identity.bool()
+    if not torch.any(identity):
+        return enhanced_stft.new_zeros(())
+    enhanced = enhanced_stft[identity]
+    clean = clean_stft[identity]
+    enhanced_energy = torch.sum(enhanced.square(), dim=(1, 3))
+    clean_energy = torch.sum(clean.square(), dim=(1, 3))
+    peak = clean_energy.amax(dim=1, keepdim=True).clamp_min(1e-12)
+    relative_db = 10.0 * torch.log10((clean_energy / peak).clamp_min(1e-12))
+    valid = (
+        (relative_db >= args.identity_energy_min_db)
+        & (relative_db < args.identity_energy_max_db)
+    )
+    epsilon = peak * 1e-12
+    gain_db = 10.0 * torch.log10(
+        ((enhanced_energy + epsilon) / (clean_energy + epsilon)).clamp_min(1e-12)
+    )
+    gain_db = gain_db.clamp(-args.identity_gain_clamp_db, args.identity_gain_clamp_db)
+    weights = valid.to(gain_db.dtype)
+    return torch.sum(gain_db.square() * weights) / weights.sum().clamp_min(1.0)
+
+
+def batch_loss(enhanced_stft, clean_stft, identity, loss_fn, args):
+    loss = loss_fn(enhanced_stft, clean_stft)
+    identity_loss = low_energy_identity_loss(enhanced_stft, clean_stft, identity, args)
+    return loss + args.identity_loss_weight * identity_loss
+
+
 def run_epoch(model, loader, loss_fn, optimizer, device, args, training):
     model.train(training)
     total_loss = 0.0
     total_items = 0
 
-    for step, (noisy, clean) in enumerate(loader, start=1):
+    for step, (noisy, clean, identity) in enumerate(loader, start=1):
         noisy = noisy.to(device, non_blocking=True)
         clean = clean.to(device, non_blocking=True)
+        identity = identity.to(device, non_blocking=True)
         noisy_stft = wav_to_stft(
             noisy, args.n_fft, args.hop_length, args.win_length, center=args.center
         )
@@ -217,7 +314,7 @@ def run_epoch(model, loader, loss_fn, optimizer, device, args, training):
 
         with torch.set_grad_enabled(training):
             enhanced_stft = model(noisy_stft)
-            loss = loss_fn(enhanced_stft, clean_stft)
+            loss = batch_loss(enhanced_stft, clean_stft, identity, loss_fn, args)
 
             if training:
                 optimizer.zero_grad(set_to_none=True)
@@ -233,6 +330,75 @@ def run_epoch(model, loader, loss_fn, optimizer, device, args, training):
             print(f"step {step:05d}/{len(loader):05d} loss={loss.item():.4f}")
 
     return total_loss / max(1, total_items)
+
+
+def run_clean_identity_validation(model, loader, loss_fn, device, args):
+    from pesq import pesq
+    from pystoi import stoi
+
+    model.eval()
+    total_loss = 0.0
+    total_items = 0
+    si_snr_values = []
+    pesq_changes = []
+    stoi_changes = []
+    with torch.no_grad():
+        for noisy, clean, identity in loader:
+            noisy = noisy.to(device, non_blocking=True)
+            clean = clean.to(device, non_blocking=True)
+            identity = identity.to(device, non_blocking=True)
+            noisy_stft = wav_to_stft(
+                noisy, args.n_fft, args.hop_length, args.win_length, center=args.center
+            )
+            clean_stft = wav_to_stft(
+                clean, args.n_fft, args.hop_length, args.win_length, center=args.center
+            )
+            enhanced_stft = model(noisy_stft)
+            loss = batch_loss(enhanced_stft, clean_stft, identity, loss_fn, args)
+            enhanced = stft_to_wav(
+                enhanced_stft,
+                args.n_fft,
+                args.hop_length,
+                args.win_length,
+                length=noisy.shape[-1],
+                center=args.center,
+            )
+            batch_items = noisy.shape[0]
+            total_loss += loss.item() * batch_items
+            total_items += batch_items
+            for item in range(batch_items):
+                input_wav = noisy[item].detach().cpu().numpy()
+                clean_wav = clean[item].detach().cpu().numpy()
+                enhanced_wav = enhanced[item].detach().cpu().numpy()
+                si_snr_values.append(si_snr_db(enhanced_wav, clean_wav))
+                input_pesq = float(pesq(args.fs, clean_wav, input_wav, "wb"))
+                enhanced_pesq = float(pesq(args.fs, clean_wav, enhanced_wav, "wb"))
+                pesq_changes.append(enhanced_pesq - input_pesq)
+                input_stoi = float(stoi(clean_wav, input_wav, args.fs, extended=False))
+                enhanced_stoi = float(
+                    stoi(clean_wav, enhanced_wav, args.fs, extended=False)
+                )
+                stoi_changes.append(enhanced_stoi - input_stoi)
+    return {
+        "loss": total_loss / max(1, total_items),
+        "si_snr_db": float(np.mean(si_snr_values)),
+        "pesq_change": float(np.mean(pesq_changes)),
+        "stoi_change": float(np.mean(stoi_changes)),
+    }
+
+
+def clean_gate_passed(metrics, args):
+    minimum_si_snr = args.clean_gate_min_si_snr
+    if args.clean_gate_reference_si_snr > 0.0:
+        minimum_si_snr = max(
+            minimum_si_snr,
+            args.clean_gate_reference_si_snr - args.clean_gate_max_si_snr_drop,
+        )
+    return (
+        metrics["si_snr_db"] >= minimum_si_snr
+        and metrics["pesq_change"] >= args.clean_gate_min_pesq_change
+        and metrics["stoi_change"] >= args.clean_gate_min_stoi_change
+    )
 
 
 def checkpoint_config(args):
@@ -292,8 +458,19 @@ def save_history(path, history):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     fieldnames = ["epoch", "train_loss"]
-    optional_fields = ["primary_valid_loss", "replay_valid_loss", "selection_loss"]
-    fieldnames.extend(field for field in optional_fields if field in history[-1])
+    optional_fields = [
+        "primary_valid_loss",
+        "replay_valid_loss",
+        "clean_valid_loss",
+        "clean_si_snr_db",
+        "clean_pesq_change",
+        "clean_stoi_change",
+        "clean_gate_passed",
+        "selection_loss",
+    ]
+    fieldnames.extend(
+        field for field in optional_fields if any(field in row for row in history)
+    )
     fieldnames.extend(["valid_loss", "learning_rate", "seconds"])
     with open(temporary, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -355,6 +532,8 @@ def main():
     parser.add_argument("--valid-clean", required=True)
     parser.add_argument("--train-manifest", default="")
     parser.add_argument("--valid-manifest", default="")
+    parser.add_argument("--train-metadata-csv", default="")
+    parser.add_argument("--valid-metadata-csv", default="")
     parser.add_argument("--replay-train-noisy", default="")
     parser.add_argument("--replay-train-clean", default="")
     parser.add_argument("--replay-train-manifest", default="")
@@ -362,11 +541,14 @@ def main():
     parser.add_argument("--replay-valid-clean", default="")
     parser.add_argument("--replay-valid-manifest", default="")
     parser.add_argument("--replay-fraction", type=float, default=0.0)
+    parser.add_argument("--clean-fraction", type=float, default=0.0)
     parser.add_argument("--epoch-size", type=int, default=0)
     parser.add_argument("--max-train-files", type=int, default=0)
     parser.add_argument("--max-valid-files", type=int, default=0)
     parser.add_argument("--max-replay-train-files", type=int, default=0)
     parser.add_argument("--max-replay-valid-files", type=int, default=0)
+    parser.add_argument("--max-clean-train-files", type=int, default=0)
+    parser.add_argument("--max-clean-valid-files", type=int, default=0)
     parser.add_argument("--out-dir", default="runs/voicebank_serious")
     parser.add_argument("--fs", type=int, default=DEFAULT_FS)
     parser.add_argument("--win-length", type=int, default=DEFAULT_WIN_LENGTH)
@@ -393,6 +575,18 @@ def main():
     parser.add_argument("--init-checkpoint", default="")
     parser.add_argument("--overwrite-run", action="store_true")
     parser.add_argument("--early-stopping-patience", type=int, default=0)
+    parser.add_argument("--identity-loss-weight", type=float, default=0.0)
+    parser.add_argument("--identity-energy-min-db", type=float, default=-50.0)
+    parser.add_argument("--identity-energy-max-db", type=float, default=-20.0)
+    parser.add_argument("--identity-gain-clamp-db", type=float, default=20.0)
+    parser.add_argument("--primary-valid-weight", type=float, default=0.60)
+    parser.add_argument("--replay-valid-weight", type=float, default=0.25)
+    parser.add_argument("--clean-valid-weight", type=float, default=0.15)
+    parser.add_argument("--clean-gate-min-si-snr", type=float, default=65.0)
+    parser.add_argument("--clean-gate-min-pesq-change", type=float, default=-0.03)
+    parser.add_argument("--clean-gate-min-stoi-change", type=float, default=-0.001)
+    parser.add_argument("--clean-gate-reference-si-snr", type=float, default=0.0)
+    parser.add_argument("--clean-gate-max-si-snr-drop", type=float, default=10.0)
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -401,6 +595,7 @@ def main():
     replay_train_paths = [args.replay_train_noisy, args.replay_train_clean]
     replay_valid_paths = [args.replay_valid_noisy, args.replay_valid_clean]
     replay_enabled = any(replay_train_paths + replay_valid_paths) or args.replay_fraction > 0
+    scene_aware = args.clean_fraction > 0.0
     if replay_enabled:
         if not all(replay_train_paths + replay_valid_paths):
             raise ValueError(
@@ -408,6 +603,24 @@ def main():
             )
         if not 0.0 < args.replay_fraction < 1.0:
             raise ValueError("--replay-fraction must be between 0 and 1")
+    if scene_aware:
+        if not replay_enabled:
+            raise ValueError("Scene-aware repair requires VoiceBank replay")
+        if not args.train_metadata_csv or not args.valid_metadata_csv:
+            raise ValueError(
+                "--clean-fraction requires --train-metadata-csv and --valid-metadata-csv"
+            )
+        if args.clean_fraction + args.replay_fraction >= 1.0:
+            raise ValueError("clean and replay fractions must sum to less than 1")
+        valid_weight_sum = (
+            args.primary_valid_weight
+            + args.replay_valid_weight
+            + args.clean_valid_weight
+        )
+        if not math.isclose(valid_weight_sum, 1.0, abs_tol=1e-6):
+            raise ValueError("validation weights must sum to 1")
+        if args.identity_loss_weight <= 0.0:
+            raise ValueError("Scene-aware repair requires --identity-loss-weight > 0")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pin_memory = device.type == "cuda"
     out_dir = Path(args.out_dir)
@@ -423,6 +636,20 @@ def main():
         f"n_fft={args.n_fft}, center={args.center}"
     )
 
+    non_clean_train_files = None
+    clean_train_files = None
+    non_clean_valid_files = None
+    clean_valid_files = None
+    if scene_aware:
+        non_clean_train_files = load_scene_files(
+            args.train_metadata_csv, "clean", invert=True
+        )
+        clean_train_files = load_scene_files(args.train_metadata_csv, "clean")
+        non_clean_valid_files = load_scene_files(
+            args.valid_metadata_csv, "clean", invert=True
+        )
+        clean_valid_files = load_scene_files(args.valid_metadata_csv, "clean")
+
     primary_train_set = PairedWavDataset(
         args.train_noisy,
         args.train_clean,
@@ -435,6 +662,7 @@ def main():
         segment_attempts=args.segment_attempts,
         valid_candidates=args.valid_candidates,
         max_files=args.max_train_files,
+        files=non_clean_train_files,
     )
     valid_set = PairedWavDataset(
         args.valid_noisy,
@@ -448,7 +676,39 @@ def main():
         segment_attempts=args.segment_attempts,
         valid_candidates=args.valid_candidates,
         max_files=args.max_valid_files,
+        files=non_clean_valid_files,
     )
+    clean_train_set = None
+    clean_valid_set = None
+    if scene_aware:
+        clean_train_set = PairedWavDataset(
+            args.train_noisy,
+            args.train_clean,
+            args.fs,
+            args.segment_seconds,
+            training=True,
+            seed=args.seed + 31,
+            min_clean_rms_db=args.min_clean_rms_db,
+            segment_attempts=args.segment_attempts,
+            valid_candidates=args.valid_candidates,
+            files=clean_train_files,
+            identity=True,
+            max_files=args.max_clean_train_files,
+        )
+        clean_valid_set = PairedWavDataset(
+            args.valid_noisy,
+            args.valid_clean,
+            args.fs,
+            args.segment_seconds,
+            training=False,
+            seed=args.seed + 31,
+            min_clean_rms_db=args.min_clean_rms_db,
+            segment_attempts=args.segment_attempts,
+            valid_candidates=args.valid_candidates,
+            files=clean_valid_files,
+            identity=True,
+            max_files=args.max_clean_valid_files,
+        )
     replay_train_set = None
     replay_valid_set = None
     if replay_enabled:
@@ -478,13 +738,24 @@ def main():
             valid_candidates=args.valid_candidates,
             max_files=args.max_replay_valid_files,
         )
-        train_set = ReplayMixDataset(
-            primary_train_set,
-            replay_train_set,
-            args.replay_fraction,
-            seed=args.seed,
-            epoch_size=args.epoch_size,
-        )
+        if scene_aware:
+            train_set = SceneAwareMixDataset(
+                primary_train_set,
+                clean_train_set,
+                replay_train_set,
+                args.clean_fraction,
+                args.replay_fraction,
+                seed=args.seed,
+                epoch_size=args.epoch_size,
+            )
+        else:
+            train_set = ReplayMixDataset(
+                primary_train_set,
+                replay_train_set,
+                args.replay_fraction,
+                seed=args.seed,
+                epoch_size=args.epoch_size,
+            )
     else:
         train_set = primary_train_set
     train_loader = DataLoader(
@@ -508,6 +779,16 @@ def main():
     if replay_valid_set is not None:
         replay_valid_loader = DataLoader(
             replay_valid_set,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=False,
+        )
+    clean_valid_loader = None
+    if clean_valid_set is not None:
+        clean_valid_loader = DataLoader(
+            clean_valid_set,
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
@@ -575,12 +856,27 @@ def main():
     if replay_enabled:
         run_config["replay_train_files"] = len(replay_train_set)
         run_config["replay_valid_files"] = len(replay_valid_set)
-        run_config["primary_items_per_epoch"] = len(train_set) - int(
-            round(len(train_set) * args.replay_fraction)
-        )
         run_config["replay_items_per_epoch"] = int(
             round(len(train_set) * args.replay_fraction)
         )
+        if not scene_aware:
+            run_config["primary_items_per_epoch"] = (
+                len(train_set) - run_config["replay_items_per_epoch"]
+            )
+    if scene_aware:
+        run_config["clean_train_files"] = len(clean_train_set)
+        run_config["clean_valid_files"] = len(clean_valid_set)
+        run_config["clean_items_per_epoch"] = int(
+            round(len(train_set) * args.clean_fraction)
+        )
+        run_config["non_clean_items_per_epoch"] = (
+            len(train_set)
+            - run_config["replay_items_per_epoch"]
+            - run_config["clean_items_per_epoch"]
+        )
+        run_config["primary_items_per_epoch"] = run_config[
+            "non_clean_items_per_epoch"
+        ]
     save_json(out_dir / "config.json", run_config)
 
     if start_epoch > args.epochs:
@@ -611,21 +907,39 @@ def main():
                     args,
                     training=False,
                 )
-                selection_loss = (
-                    (1.0 - args.replay_fraction) * primary_valid_loss
-                    + args.replay_fraction * replay_valid_loss
-                )
+                if clean_valid_loader is not None:
+                    clean_metrics = run_clean_identity_validation(
+                        model, clean_valid_loader, loss_fn, device, args
+                    )
+                    clean_valid_loss = clean_metrics["loss"]
+                    selection_loss = (
+                        args.primary_valid_weight * primary_valid_loss
+                        + args.replay_valid_weight * replay_valid_loss
+                        + args.clean_valid_weight * clean_valid_loss
+                    )
+                    gate_passed = clean_gate_passed(clean_metrics, args)
+                else:
+                    clean_metrics = None
+                    clean_valid_loss = None
+                    gate_passed = True
+                    selection_loss = (
+                        (1.0 - args.replay_fraction) * primary_valid_loss
+                        + args.replay_fraction * replay_valid_loss
+                    )
             else:
                 replay_valid_loss = None
+                clean_metrics = None
+                clean_valid_loss = None
+                gate_passed = True
                 selection_loss = primary_valid_loss
         valid_loss = selection_loss
         seconds = time.perf_counter() - started
 
-        is_best = valid_loss < best_loss
+        is_best = gate_passed and valid_loss < best_loss
         if is_best:
             best_loss = valid_loss
             epochs_without_improvement = 0
-        else:
+        elif math.isfinite(best_loss):
             epochs_without_improvement += 1
         row = {
             "epoch": epoch,
@@ -642,12 +956,25 @@ def main():
                     "selection_loss": f"{selection_loss:.8f}",
                 }
             )
+        if clean_metrics is not None:
+            row.update(
+                {
+                    "clean_valid_loss": f"{clean_valid_loss:.8f}",
+                    "clean_si_snr_db": f"{clean_metrics['si_snr_db']:.8f}",
+                    "clean_pesq_change": f"{clean_metrics['pesq_change']:.8f}",
+                    "clean_stoi_change": f"{clean_metrics['stoi_change']:.8f}",
+                    "clean_gate_passed": str(bool(gate_passed)).lower(),
+                }
+            )
         validation_metrics = {
             "primary_valid_loss": primary_valid_loss,
             "selection_loss": selection_loss,
         }
         if replay_valid_loss is not None:
             validation_metrics["replay_valid_loss"] = replay_valid_loss
+        if clean_metrics is not None:
+            validation_metrics["clean_identity"] = clean_metrics
+            validation_metrics["clean_gate_passed"] = gate_passed
         history.append(row)
         save_history(metrics_path, history)
         plot_history(out_dir / "training_curve.png", history)
@@ -683,6 +1010,14 @@ def main():
                 f"replay_valid={replay_valid_loss:.4f} "
                 f"selection_loss={selection_loss:.4f}"
             )
+            if clean_metrics is not None:
+                validation_text += (
+                    f" clean_valid={clean_valid_loss:.4f} "
+                    f"clean_si_snr={clean_metrics['si_snr_db']:.2f}dB "
+                    f"clean_pesq_change={clean_metrics['pesq_change']:+.4f} "
+                    f"clean_stoi_change={clean_metrics['stoi_change']:+.5f} "
+                    f"clean_gate={'pass' if gate_passed else 'fail'}"
+                )
         print(
             f"epoch {epoch:03d} train_loss={train_loss:.4f} {validation_text} "
             f"lr={learning_rate:.3e} seconds={seconds:.1f}"
