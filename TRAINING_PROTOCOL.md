@@ -1850,7 +1850,7 @@ runs/clean_diagnosis_v4_valid/
 max(65, v3 baseline - 10) = max(65, 77.5466 - 10) = 67.5466 dB
 ```
 
-## 15. classroom_v4 identity repair v1（待用户正式训练）
+## 15. classroom_v4 identity repair v1（已完成，未通过）
 
 ### 15.1 已实现的训练行为
 
@@ -1913,3 +1913,98 @@ D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custo
 训练过程中每个 epoch 会直接显示：classroom/replay/clean validation loss、
 clean SI-SNR、PESQ change、STOI change 和 `clean_gate=pass/fail`。正式训练由用户
 在可见终端中执行；Codex 不在后台代替启动。
+
+### 15.4 正式结果（2026-07-17）
+
+用户完成全部 8 个 epoch，总耗时 1701.9 秒（约 28.4 分钟）。没有 epoch 同时
+通过三条 clean hard gate，因此训练目录只有 `last.tar`，没有 `best.tar`；按
+15.1 的预定规则，本次实验判定失败，不能用 epoch 8 的 `last.tar` 替换 v3/v4。
+
+```text
+epoch  clean SI-SNR  PESQ change  STOI change  clean gate  selection loss
+1        42.524 dB     -0.2061      -0.00289     fail          0.8033
+2        42.066 dB     -0.2301      -0.00301     fail          0.8174
+3        47.215 dB     -0.1476      -0.00173     fail          0.7099
+4        54.981 dB     -0.0782      -0.00082     fail          0.5877
+5        41.740 dB     -0.2318      -0.00276     fail          0.8318
+6        40.369 dB     -0.2111      -0.00296     fail          0.8541
+7        64.904 dB     -0.0438      -0.00041     fail          0.4136
+8        44.738 dB     -0.1709      -0.00207     fail          0.7520
+gate     67.547 dB     -0.0300      -0.00100
+```
+
+epoch 7 是最接近门槛且 selection loss 最低的候选：STOI 已通过，SI-SNR 还差
+2.64 dB，PESQ change 还差 0.0138。说明 identity repair 方向有效，但 epoch 间
+振荡过大。v1 脚本当时只保存过门槛的 `best.tar` 和最后的 `last.tar`，所以
+epoch 7 权重已经丢失，无法补做完整测试矩阵。由于没有合格 checkpoint，本次
+不运行 v4/v2/VoiceBank 正式测试和试听；对不合格的 epoch 8 做完整测试没有
+模型选择意义。
+
+### 15.5 BatchNorm 漂移诊断
+
+GTCRN 含多个 `BatchNorm2d`。repair v1 虽然学习率只有 `1e-5`，训练模式仍会
+每个 batch 更新 BatchNorm 的 running mean/variance。使用 v4 原始 checkpoint
+做受控检查：学习率设为 0，只让 1 条训练样本经过一次训练模式，然后运行完整
+99 条 clean-valid。
+
+```text
+condition                         SI-SNR     PESQ change  STOI change
+v4 direct diagnosis              49.085 dB    -0.1379     -0.00190
+1 sample, lr=0, BN updates        40.940 dB    -0.3308     -0.00478
+1 sample, lr=0, frozen BN         49.085 dB    -0.1379     -0.00190
+```
+
+学习率为 0 时模型权重不会变化，指标仍下降约 8.1 dB；加 `frozen BN` 后与原始
+v4 精确一致。因此 v1 大幅振荡的重要来源是 BatchNorm 统计量漂移，不应先通过
+放宽门槛或扩大 clean 比例掩盖它。
+
+## 16. classroom_v4 identity repair v2（下一次训练）
+
+### 16.1 唯一主要变量
+
+v2 保持 v1 的数据比例、identity loss、学习率、8 epoch 和 hard gate 不变，只
+冻结 BatchNorm running statistics。BN 的 affine scale/bias 参数仍可反向传播；
+冻结的只是运行均值和方差。这样既针对已证实的漂移原因，也保持实验可解释性。
+
+训练脚本同时增加：
+
+```text
+--freeze-batchnorm:
+  repair 训练时 BatchNorm 使用 v4 checkpoint 的 running statistics
+
+--save-every-epoch:
+  保存 checkpoints/epoch_001.tar ... epoch_008.tar
+
+checkpoints/best_selection_candidate.tar:
+  始终保存 selection loss 最低的候选，即使它没有通过 clean hard gate
+
+clean_validation_curve.png:
+  单独绘制 SI-SNR/PESQ/STOI 及三条 hard gate
+```
+
+`best_selection_candidate.tar` 只是诊断候选，不能替代通过门槛的 `best.tar`。
+
+### 16.2 frozen-BN 方向性 smoke test
+
+使用 200 条/epoch、20 条 clean-valid 做 2 epoch 小测试：
+
+```text
+epoch  clean SI-SNR  PESQ change  STOI change  gate
+1        63.83 dB      -0.0219      -0.00005    fail (only SI-SNR)
+2        72.34 dB      -0.0109      -0.00012    pass
+```
+
+该结果只证明梯度方向和 BN 冻结机制正确，不能代替 99 条 clean-valid 的正式
+训练选择，更不能当成最终模型指标。
+
+### 16.3 正式训练命令（Windows cmd 单行）
+
+在 `D:\modeltraining\gtcrn>` 中执行下面完整的一行：
+
+```cmd
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py --train-noisy ..\dataset_classroom_v4\generated\train\noisy --train-clean ..\dataset_classroom_v4\generated\train\clean --valid-noisy ..\dataset_classroom_v4\generated\valid\noisy --valid-clean ..\dataset_classroom_v4\generated\valid\clean --train-metadata-csv ..\dataset_classroom_v4\generated\metadata\train.csv --valid-metadata-csv ..\dataset_classroom_v4\generated\metadata\valid.csv --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json --replay-fraction 0.25 --clean-fraction 0.15 --epoch-size 10000 --out-dir runs\classroom_v4_identity_repair_v2_frozen_bn --segment-seconds 4 --epochs 8 --batch-size 8 --lr 1e-5 --scheduler none --num-workers 4 --identity-loss-weight 0.1 --identity-energy-min-db -50 --identity-energy-max-db -20 --identity-gain-clamp-db 20 --primary-valid-weight 0.60 --replay-valid-weight 0.25 --clean-valid-weight 0.15 --clean-gate-min-si-snr 65 --clean-gate-reference-si-snr 77.5466 --clean-gate-max-si-snr-drop 10 --clean-gate-min-pesq-change -0.03 --clean-gate-min-stoi-change -0.001 --early-stopping-patience 3 --freeze-batchnorm --save-every-epoch --init-checkpoint runs\classroom_v4\checkpoints\best.tar --seed 20260717
+```
+
+训练结束后先检查是否存在 `checkpoints/best.tar`。存在才进入完整测试矩阵；不
+存在则 v2 仍失败，但所有 epoch 已保留，可以分析最接近门槛的具体 checkpoint，
+不再重复 v1 丢失 epoch 7 的问题。

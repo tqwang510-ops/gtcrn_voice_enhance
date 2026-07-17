@@ -298,6 +298,10 @@ def batch_loss(enhanced_stft, clean_stft, identity, loss_fn, args):
 
 def run_epoch(model, loader, loss_fn, optimizer, device, args, training):
     model.train(training)
+    if training and args.freeze_batchnorm:
+        for module in model.modules():
+            if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+                module.eval()
     total_loss = 0.0
     total_items = 0
 
@@ -421,6 +425,7 @@ def save_checkpoint(
     best_loss,
     validation_metrics=None,
     epochs_without_improvement=0,
+    best_selection_loss=float("inf"),
 ):
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -430,6 +435,7 @@ def save_checkpoint(
             "epoch": epoch,
             "valid_loss": valid_loss,
             "best_loss": best_loss,
+            "best_selection_loss": best_selection_loss,
             "validation_metrics": validation_metrics or {"valid_loss": valid_loss},
             "epochs_without_improvement": epochs_without_improvement,
             "config": checkpoint_config(args),
@@ -524,6 +530,42 @@ def plot_history(path, history):
     plt.close(figure)
 
 
+def plot_clean_history(path, history, args):
+    if not history or "clean_si_snr_db" not in history[-1]:
+        return
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = [int(row["epoch"]) for row in history]
+    si_snr = [float(row["clean_si_snr_db"]) for row in history]
+    pesq_change = [float(row["clean_pesq_change"]) for row in history]
+    stoi_change = [float(row["clean_stoi_change"]) for row in history]
+    minimum_si_snr = args.clean_gate_min_si_snr
+    if args.clean_gate_reference_si_snr > 0.0:
+        minimum_si_snr = max(
+            minimum_si_snr,
+            args.clean_gate_reference_si_snr - args.clean_gate_max_si_snr_drop,
+        )
+    figure, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
+    series = [
+        (si_snr, minimum_si_snr, "clean SI-SNR (dB)"),
+        (pesq_change, args.clean_gate_min_pesq_change, "clean PESQ change"),
+        (stoi_change, args.clean_gate_min_stoi_change, "clean STOI change"),
+    ]
+    for axis, (values, threshold, label) in zip(axes, series):
+        axis.plot(epochs, values, marker="o", markersize=4)
+        axis.axhline(threshold, color="tab:red", linestyle="--", label="hard gate")
+        axis.set_ylabel(label)
+        axis.grid(True, alpha=0.3)
+        axis.legend()
+    axes[-1].set_xlabel("Epoch")
+    figure.tight_layout()
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train GTCRN on paired noisy/clean wav files.")
     parser.add_argument("--train-noisy", required=True)
@@ -575,6 +617,8 @@ def main():
     parser.add_argument("--init-checkpoint", default="")
     parser.add_argument("--overwrite-run", action="store_true")
     parser.add_argument("--early-stopping-patience", type=int, default=0)
+    parser.add_argument("--save-every-epoch", action="store_true")
+    parser.add_argument("--freeze-batchnorm", action="store_true")
     parser.add_argument("--identity-loss-weight", type=float, default=0.0)
     parser.add_argument("--identity-energy-min-db", type=float, default=-50.0)
     parser.add_argument("--identity-energy-max-db", type=float, default=-20.0)
@@ -806,6 +850,7 @@ def main():
 
     start_epoch = 1
     best_loss = float("inf")
+    best_selection_loss = float("inf")
     epochs_without_improvement = 0
     history = []
     if args.resume:
@@ -823,6 +868,9 @@ def main():
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_epoch = int(checkpoint["epoch"]) + 1
         best_loss = float(checkpoint.get("best_loss", checkpoint.get("valid_loss", best_loss)))
+        best_selection_loss = float(
+            checkpoint.get("best_selection_loss", best_selection_loss)
+        )
         epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
         history = [
             row for row in load_history(metrics_path) if int(row["epoch"]) < start_epoch
@@ -935,6 +983,9 @@ def main():
         valid_loss = selection_loss
         seconds = time.perf_counter() - started
 
+        is_best_selection = valid_loss < best_selection_loss
+        if is_best_selection:
+            best_selection_loss = valid_loss
         is_best = gate_passed and valid_loss < best_loss
         if is_best:
             best_loss = valid_loss
@@ -978,6 +1029,7 @@ def main():
         history.append(row)
         save_history(metrics_path, history)
         plot_history(out_dir / "training_curve.png", history)
+        plot_clean_history(out_dir / "clean_validation_curve.png", history, args)
         save_checkpoint(
             checkpoints_dir / "last.tar",
             model,
@@ -988,7 +1040,34 @@ def main():
             best_loss,
             validation_metrics,
             epochs_without_improvement,
+            best_selection_loss,
         )
+        if args.save_every_epoch:
+            save_checkpoint(
+                checkpoints_dir / f"epoch_{epoch:03d}.tar",
+                model,
+                optimizer,
+                epoch,
+                args,
+                valid_loss,
+                best_loss,
+                validation_metrics,
+                epochs_without_improvement,
+                best_selection_loss,
+            )
+        if is_best_selection:
+            save_checkpoint(
+                checkpoints_dir / "best_selection_candidate.tar",
+                model,
+                optimizer,
+                epoch,
+                args,
+                valid_loss,
+                best_loss,
+                validation_metrics,
+                epochs_without_improvement,
+                best_selection_loss,
+            )
         if is_best:
             save_checkpoint(
                 checkpoints_dir / "best.tar",
@@ -1000,6 +1079,7 @@ def main():
                 best_loss,
                 validation_metrics,
                 epochs_without_improvement,
+                best_selection_loss,
             )
 
         if replay_valid_loss is None:
@@ -1024,6 +1104,10 @@ def main():
         )
         if is_best:
             print(f"saved best checkpoint: valid_loss={best_loss:.4f}")
+        elif is_best_selection:
+            print(
+                "saved best_selection_candidate.tar; clean hard gate still failed"
+            )
         if (
             args.early_stopping_patience > 0
             and epochs_without_improvement >= args.early_stopping_patience
