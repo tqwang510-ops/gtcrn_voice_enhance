@@ -3109,3 +3109,63 @@ replay；不使用 v6 candidate。
 ```cmd
 D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py --train-noisy ..\dataset_classroom_v7\generated\train\noisy --train-clean ..\dataset_classroom_v7\generated\train\clean --valid-noisy ..\dataset_classroom_v7\generated\valid\noisy --valid-clean ..\dataset_classroom_v7\generated\valid\clean --train-metadata-csv ..\dataset_classroom_v7\generated\metadata\train.csv --valid-metadata-csv ..\dataset_classroom_v7\generated\metadata\valid.csv --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json --replay-fraction 0.25 --clean-fraction 0.12 --clean-scene-type identity --epoch-size 12000 --validation-domains validation_domains_v7.json --out-dir runs\classroom_v7 --segment-seconds 4 --epochs 20 --batch-size 8 --lr 2e-5 --scheduler none --num-workers 4 --identity-loss-weight 0.1 --freeze-batchnorm --save-every-epoch --early-stopping-patience 5 --init-checkpoint runs\classroom_v5_chinese\checkpoints\best.tar --seed 20260722 --overwrite-run
 ```
+
+### 17.22 v7 正式训练、test 对照与试听（2026-07-18）
+
+用户在本机终端完成全部 20 epoch，未触发 early stopping，总训练时间约
+108.7 分钟。六个验证域从 epoch 1 起全部通过硬门槛。综合选择最优为 epoch 15：
+
+```text
+runs/classroom_v7/checkpoints/best.tar
+checkpoint epoch: 15
+selection loss: -2.43928227
+```
+
+epoch 20 的 continuous/murmur/far SI-SNR change 略高，但 epoch 15 的综合选择
+分数与 clean 透明度更稳，因此正式评估使用 `best.tar`，不用 `last.tar`。
+
+在未参与 checkpoint 选择的 800 条 v7 test 上，与 v5 epoch 3 对照：
+
+| metric | v5 | v7 best |
+|---|---:|---:|
+| SI-SNR change | +0.020 dB | +0.714 dB |
+| PESQ change | +0.253 | +0.395 |
+| STOI change | +0.0107 | +0.0244 |
+| improved fraction | 69.44% | 83.48% |
+| noise-only attenuation | 17.39 dB | 16.95 dB |
+| clean enhanced SI-SNR | 85.87 dB | 92.39 dB |
+| clean PESQ change | -0.0280 | -0.0199 |
+| clean STOI change | -0.00097 | -0.00075 |
+
+v7 相对 v5 的目标域提升成立，同时 clean 透明度没有被牺牲。noise-only 衰减
+少 0.44 dB，但不能用这一个指标否定模型，因为含语音样本的 SI-SNR/PESQ/STOI
+和改善比例均更好。
+
+v7 test 分场景：
+
+| subset | files | SI-SNR change | PESQ change | STOI change |
+|---|---:|---:|---:|---:|
+| continuous without murmur | 481 | +0.598 | +0.374 | +0.0206 |
+| student murmur | 203 | +0.988 | +0.444 | +0.0332 |
+| HVAC | 312 | +0.780 | +0.433 | +0.0252 |
+| machine/no-RIR | 172 | +1.069 | +0.454 | +0.0241 |
+| far speech | 200 | +0.305 | +0.285 | +0.0233 |
+
+far speech 仍是最弱场景，不应只看总平均值。最差 SI-SNR 样本
+`test_000480.wav` 为 -10.77 dB，但 PESQ 仍提高 +0.141，说明 SI-SNR 与听感可能
+冲突，必须人工试听。
+
+试听矩阵：
+
+```text
+runs/v7_eval/listening/01_v5/
+runs/v7_eval/listening/02_v7_best/
+```
+
+两边文件名前缀一致，每组包含 noisy/enhanced/clean。01-04 为 HVAC、机器、
+PRESTO、PCAFETER；05-06 为 far；07 为 identity；08 为最差 SI-SNR 样本。
+
+下一步先完成人工 A/B：重点确认 03/04 学生讨论、05/06 远讲、07 clean 透明度、
+08 是否真实听感退化。若整体通过，停止继续调训练数据，运行 v4/v2/VoiceBank
+完整回归和流式 center 一致性测试，再决定是否提升为部署候选；若不通过，只按
+具体失败场景诊断，不立即从头训练。

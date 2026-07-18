@@ -50,3 +50,13 @@ New baseline evaluations made after the validation-accounting repair should incl
 - Full evaluation: `runs/v6_eval/`
 - v5 comparison listening: `runs/v6_eval/listening_v5_baseline/`
 - v6 epoch 9 listening: `runs/v6_eval/listening_epoch9/`
+
+## v7 continuous and student-murmur evaluation
+
+- Training run: `runs/classroom_v7/`
+- Selected checkpoint: `runs/classroom_v7/checkpoints/best.tar` (epoch 15)
+- v7 test evaluation: `runs/v7_eval/best_test/`
+- v5 baseline on the same test: `runs/v7_eval/v5_test/`
+- Listening manifest: `runs/v7_eval/listening_manifest.json`
+- v5 listening output: `runs/v7_eval/listening/01_v5/`
+- v7 listening output: `runs/v7_eval/listening/02_v7_best/`
