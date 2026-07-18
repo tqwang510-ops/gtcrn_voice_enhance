@@ -2597,3 +2597,51 @@ runs/v5_eval/validation_baselines/
 
 旧 SNR 产物以 `old_snr18_32` 标记，仅保留追溯用途。仓库根目录新增
 `RUNS_INDEX.md`，即使 `runs/` 被 Git 忽略，也能查到各产物的含义和位置。
+
+### 17.12 epoch 5 候选的第一阶段完整测试与试听（2026-07-18）
+
+暂不训练新模型。先比较原 `best.tar`（epoch 3）与按新归一化 selection 发现的
+epoch 5。epoch 5 在完整 v5 test 的修正口径结果：
+
+| 指标 | epoch 3 | epoch 5 |
+|---|---:|---:|
+| non-identity SI-SNR change | +0.082 | +0.105 |
+| non-identity PESQ change | +0.139 | +0.167 |
+| non-identity STOI change | +0.00142 | +0.00260 |
+| SI-SNR 改善占比 | 77.63% | 74.96% |
+| noise-only 衰减 | 15.75 dB | 17.36 dB |
+| identity clean SI-SNR | 80.86 dB | 80.04 dB |
+| identity clean PESQ change | -0.065 | -0.077 |
+| identity clean STOI change | -0.00251 | -0.00329 |
+
+分场景看，epoch 5 的 far speech、HVAC、event 的 PESQ/STOI 均优于 epoch 3；
+event SI-SNR 退化也从 -0.464 缩小到 -0.411 dB。代价是 clean 透明度略降，
+identity SI-SNR <30 dB 的文件从 8/75 增至 11/75。
+
+AISHELL normalized clean 100 条直接对照进一步确认该取舍：
+
+```text
+metric                 epoch 3     epoch 5
+mean SI-SNR             78.43       78.12 dB
+minimum SI-SNR           9.04        8.79 dB
+mean PESQ                4.559       4.533
+mean STOI                0.99650     0.99518
+low-energy attenuation  -0.381      -0.521 dB
+```
+
+epoch 5 对噪声与事件更积极，但也更容易削弱中文 clean 的低能量部分。它不是
+可以仅凭平均分自动替换 epoch 3 的升级版本。当前停在人工试听门：
+
+```text
+教室场景 epoch 3: runs/v5_eval/listening/
+教室场景 epoch 5: runs/v5_epoch5_eval/listening/
+
+中文 normalized clean epoch 3:
+runs/v5_epoch5_eval/aishell_clean_norm_compare/listening_epoch3/
+中文 normalized clean epoch 5:
+runs/v5_epoch5_eval/aishell_clean_norm_compare/listening_epoch5/
+```
+
+clean 对照选择了 epoch 5 相对 epoch 3 PESQ 退化最大的 5 条。每个文件夹内
+同一 `clean_delta_XX` 的 `_enhanced.wav` 互相比较，并以 `_clean.wav` 为原音参考。
+用户确认听感前不继续跑 v2/v4/VoiceBank 全矩阵，也不启动新训练。

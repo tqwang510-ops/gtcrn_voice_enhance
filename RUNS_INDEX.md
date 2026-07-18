@@ -32,3 +32,11 @@ New baseline evaluations made after the validation-accounting repair should incl
 - `v4_current_sampled.json`: v4, final SNR data, repaired validation sampling.
 - `v5_current_sampled.json`: v5 epoch 3 (`best.tar`) on the same files.
 - `v5_epoch5_current_sampled.json`: v5 epoch 5 candidate on the same files.
+
+## Epoch 5 candidate audit
+
+- Full v5 Chinese test: `runs/v5_epoch5_eval/v5_test/`
+- Classroom listening matrix: `runs/v5_epoch5_eval/listening/`
+- AISHELL normalized clean comparison: `runs/v5_epoch5_eval/aishell_clean_norm_compare/`
+- Epoch 3 clean listening: `runs/v5_epoch5_eval/aishell_clean_norm_compare/listening_epoch3/`
+- Epoch 5 clean listening: `runs/v5_epoch5_eval/aishell_clean_norm_compare/listening_epoch5/`
