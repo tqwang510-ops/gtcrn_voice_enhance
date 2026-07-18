@@ -417,7 +417,15 @@ def load_validation_domains(path):
     return domains
 
 
-def domain_scene_files(metadata_csv, include_scene_types, exclude_scene_types):
+def domain_scene_files(
+    metadata_csv,
+    include_scene_types,
+    exclude_scene_types,
+    require_nonempty_fields=None,
+    require_empty_fields=None,
+):
+    require_nonempty_fields = require_nonempty_fields or []
+    require_empty_fields = require_empty_fields or []
     names = []
     with open(metadata_csv, "r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
@@ -425,6 +433,10 @@ def domain_scene_files(metadata_csv, include_scene_types, exclude_scene_types):
             if include_scene_types and scene not in include_scene_types:
                 continue
             if exclude_scene_types and scene in exclude_scene_types:
+                continue
+            if any(not row.get(field, "").strip() for field in require_nonempty_fields):
+                continue
+            if any(row.get(field, "").strip() for field in require_empty_fields):
                 continue
             names.append(row["file"])
     if not names:
@@ -439,6 +451,8 @@ def build_domain_dataset(domain, args):
             domain["metadata_csv"],
             domain.get("include_scene_types") or [],
             domain.get("exclude_scene_types") or [],
+            domain.get("require_nonempty_fields") or [],
+            domain.get("require_empty_fields") or [],
         )
     elif domain.get("manifest"):
         files = load_manifest(domain["manifest"])

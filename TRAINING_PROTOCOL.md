@@ -3000,3 +3000,112 @@ dataset_classroom_v7_continuous_smoke/listening_samples/
 
 包含 AirConditioner/CopyMachine 各自的 near/far、typical/low，每组仅比较
 `_noisy.wav` 输入和 `_clean.wav` 目标。用户确认该声场以前不训练任何新模型。
+
+### 17.20 当前噪声生成方式、PRESTO/PCAFETER 位置与模型血缘校正（2026-07-18）
+
+当前 continuous-only smoke 的噪声不是程序凭空合成的，流程是：
+
+```text
+1. 从 MS-SNSD 的 AirConditioner/CopyMachine 文件中随机裁 4 秒。
+2. 按目标语音 RMS 和指定 SNR 缩放噪声：noise_rms = speech_rms / 10^(SNR/20)。
+3. 与语音相加；far speech 还会先经过 BUT/RIRS 短 RIR，再叠加连续底噪。
+4. 最后做峰值限制，并把 clean target 保持为未加新增噪声的 AISHELL native_room 语音。
+```
+
+当前 v7 smoke 的实际来源只有 `ms_ac` 和 `ms_continuous`，类别只有
+AirConditioner、CopyMachine。
+
+PRESTO/PCAFETER 检查结果：
+
+```text
+PRESTO:    16 个 mono/16 kHz 文件，约 1.33 小时
+PCAFETER:  16 个 mono/16 kHz 文件，约 1.33 小时
+```
+
+它们适合模拟持续的学生低声讨论，但不应单独成为 noisy input，否则模型会把
+“没有空调/风扇/设备底噪的纯讨论声”当作完整教室分布。下一版建议：
+
+```text
+base bed:   AirConditioner/CopyMachine，所有带噪语音都有
+murmur bed: PRESTO/PCAFETER，只在约 25-35% 的带噪场景叠加
+murmur SNR: 约 15-24 dB，低声、不可清晰辨认内容
+```
+
+这样才能表示“持续机械底噪 + 偶尔学生窸窣讨论”的真实教室，而不是孤立事件。
+已生成 layered-murmur smoke：
+`D:\modeltraining\dataset_classroom_v7_murmur_smoke\generated`。
+共 400/80/80 个 train/valid/test 样本，其中 30% 的非 identity、非 noise-only
+样本叠加 PRESTO/PCAFETER；PRESTO 与 PCAFETER 各贡献 70 个样本。用户试听确认
+学生讨论电平和持续底噪符合目标，因此可以进入正式数据生成。
+
+**模型血缘校正**：此前文档把官方 DNS3/VCTK 权重与当前实验链混在一起，现明确
+纠正：
+
+```text
+官方 checkpoint（存在但未用于当前自定义链）：
+  checkpoints/model_trained_on_dns3.tar
+  checkpoints/model_trained_on_vctk.tar
+
+实际当前链：
+  VoiceBank serious v1：自定义 train_custom.py，从随机初始化开始
+  classroom_v2：从 VoiceBank serious best.tar 初始化
+  classroom_replay_v3：从 classroom_v2 best.tar 初始化
+  v5 Chinese：从 classroom_replay_v3 best.tar 初始化
+  v6 candidate epoch 9：从 v5 best.tar 初始化，继续微调
+```
+
+官方 VCTK/DNS3 checkpoint 的 STFT 为 `n_fft=512`；当前自定义链使用 `n_fft=256`。
+实测官方权重加载到 `GTCRN(nfft=256)` 有 2 个 shape mismatch，不能直接当作当前
+模型初始化；加载到 `n_fft=512` 才形状一致。未来若比较官方初始化，必须单独做
+`n_fft=512` 对照实验，不能把它和现有 v5/v6 数字直接混称。
+
+### 17.21 v7 continuous + student murmur 正式数据（2026-07-18）
+
+用户确认 layered-murmur smoke 听感符合普通 50-100 平方米教室目标，正式数据
+固定为：
+
+```text
+base noise: MS-SNSD AirConditioner / CopyMachine
+murmur layer: PRESTO / PCAFETER
+event scenes: 0%
+OOFFICE / ESC-50: 0%（不进入主体噪声）
+train/valid/test: 8000/800/800（约 8.89/0.89/0.89 小时；noisy/clean 是配对文件，
+不重复计入时长）
+segment: 4 s, fs=16 kHz, center=true
+murmur: 30% of non-identity/non-noise-only; 75% at 15-24 dB,
+        25% at 10-15 dB
+RIR: BUT ReverbDB and RIRS small/medium rooms, configured area 25-100 m2
+```
+
+生成顺序：先生成 continuous-only 数据，再运行
+`add_student_murmur_bed.py` 叠加讨论层。正式输出为
+`D:\modeltraining\dataset_classroom_v7\generated`，实际统计为：
+
+```text
+train/valid/test: 8000/800/800
+student murmur: 2467（PRESTO 1224，PCAFETER 1243）
+scene distribution (train): far 1949, HVAC 3012, identity 999,
+                            background 1878, noise-only 162
+RIR: 25 个房间，面积约束 25-100 m2；event=0
+speaker/room/noise/event 跨 split overlap: 0
+audio audit: 19200 WAV，16 kHz/4 s，格式、长度、非有限值、静音、峰值均通过
+```
+
+PRESTO/PCAFETER 的 16 个同步通道按录音时间切分，而不是按通道文件切分：
+train 使用 0%-70%，valid 使用 70%-85%，test 使用 85%-100%，避免同一时刻的
+学生讨论声泄漏到不同 split。新增的 `student_murmur_start_sample` 和
+`student_murmur_source` 会记录该切分位置和来源。
+
+v3 与 v5 初始化对照：在 v7 valid 的快速对照中，v3 的非 identity 语音 SI-SNR
+change 为 -4.50 dB，而 v5 在同一批 256 条样本上为 +0.41 dB，且 v5 的 clean
+PESQ/STOI 退化接近 0。因此 v7 正式训练从
+`runs\classroom_v5_chinese\checkpoints\best.tar` 初始化，并保留 25% VoiceBank
+replay；不使用 v6 candidate。
+
+验证域配置为 `validation_domains_v7.json`，额外区分持续底噪和 murmur 层，并
+对中文 clean raw/normalized 设置硬保护线。训练管线加载检查已通过（epochs=0），
+尚未执行正式训练。用户手动训练命令：
+
+```cmd
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py --train-noisy ..\dataset_classroom_v7\generated\train\noisy --train-clean ..\dataset_classroom_v7\generated\train\clean --valid-noisy ..\dataset_classroom_v7\generated\valid\noisy --valid-clean ..\dataset_classroom_v7\generated\valid\clean --train-metadata-csv ..\dataset_classroom_v7\generated\metadata\train.csv --valid-metadata-csv ..\dataset_classroom_v7\generated\metadata\valid.csv --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json --replay-fraction 0.25 --clean-fraction 0.12 --clean-scene-type identity --epoch-size 12000 --validation-domains validation_domains_v7.json --out-dir runs\classroom_v7 --segment-seconds 4 --epochs 20 --batch-size 8 --lr 2e-5 --scheduler none --num-workers 4 --identity-loss-weight 0.1 --freeze-batchnorm --save-every-epoch --early-stopping-patience 5 --init-checkpoint runs\classroom_v5_chinese\checkpoints\best.tar --seed 20260722 --overwrite-run
+```
