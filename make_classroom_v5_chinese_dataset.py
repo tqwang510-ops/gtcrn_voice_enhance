@@ -262,19 +262,19 @@ def gather_ms_entries(root, categories, seed):
     }
 
 
-def gather_ms_pools(root, seed):
+def gather_ms_pools(root, seed, ac_categories, continuous_categories, event_categories):
     """Split MS-SNSD once over the category union so a file can never land in
     different splits through overlapping semantic pools."""
-    union = MS_AC_CATEGORIES | MS_CONTINUOUS_CATEGORIES | MS_EVENT_CATEGORIES
+    union = ac_categories | continuous_categories | event_categories
     entries = gather_ms_entries(root, union, seed)
     pools = {}
     for split, split_entries in entries.items():
         pools[split] = {
-            "ms_ac": [e for e in split_entries if e.category in MS_AC_CATEGORIES],
+            "ms_ac": [e for e in split_entries if e.category in ac_categories],
             "ms_continuous": [
-                e for e in split_entries if e.category in MS_CONTINUOUS_CATEGORIES
+                e for e in split_entries if e.category in continuous_categories
             ],
-            "ms_event": [e for e in split_entries if e.category in MS_EVENT_CATEGORIES],
+            "ms_event": [e for e in split_entries if e.category in event_categories],
         }
     return pools
 
@@ -292,7 +292,13 @@ def gather_noise_pools(args):
     background = {split: defaultdict(list) for split in ["train", "valid", "test"]}
     events = {split: defaultdict(list) for split in ["train", "valid", "test"]}
 
-    ms_pools = gather_ms_pools(args.ms_snsd_root, args.split_seed)
+    ms_pools = gather_ms_pools(
+        args.ms_snsd_root,
+        args.split_seed,
+        args.ms_ac_categories,
+        args.ms_continuous_categories,
+        args.ms_event_categories,
+    )
     ooffice = gather_ooffice_entries(
         args.ooffice_root,
         args.split_seed + 3000,
@@ -383,14 +389,20 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
             background_snr = float("nan")
             if scene_type in {"hvac_noise", "noise_no_rir"}:
                 pools = hvac if scene_type == "hvac_noise" else background
-                weights = HVAC_SOURCE_WEIGHTS if scene_type == "hvac_noise" else BACKGROUND_SOURCE_WEIGHTS
+                weights = (
+                    args.hvac_source_weights
+                    if scene_type == "hvac_noise"
+                    else args.background_source_weights
+                )
                 noise_source, noise_entry = pick_noise(pools, weights, rng)
                 background_wav, noise_start = prepare_background(noise_entry, samples, args, rng)
                 background_snr = sample_scene_snr_db(scene_type, args, rng)
                 target_noise_rms = rms(noisy) / (10.0 ** (background_snr / 20.0))
                 noisy = noisy + background_wav * (target_noise_rms / (rms(background_wav) + 1e-12))
             elif scene_type == "noise_only":
-                noise_source, noise_entry = pick_noise(background, BACKGROUND_SOURCE_WEIGHTS, rng)
+                noise_source, noise_entry = pick_noise(
+                    background, args.background_source_weights, rng
+                )
                 background_wav, noise_start = prepare_background(noise_entry, samples, args, rng)
                 noisy = scale_to_dbfs(
                     background_wav,
@@ -529,6 +541,23 @@ def main():
     parser.add_argument("--far-ms-continuous-weight", type=float, default=0.45)
     parser.add_argument("--far-ooffice-weight", type=float, default=0.35)
     parser.add_argument("--far-esc-background-weight", type=float, default=0.20)
+    parser.add_argument("--hvac-ms-ac-weight", type=float, default=0.50)
+    parser.add_argument("--hvac-ooffice-weight", type=float, default=0.50)
+    parser.add_argument("--background-ms-continuous-weight", type=float, default=0.45)
+    parser.add_argument("--background-ooffice-weight", type=float, default=0.35)
+    parser.add_argument("--background-esc-weight", type=float, default=0.20)
+    parser.add_argument(
+        "--ms-ac-categories",
+        default=",".join(sorted(MS_AC_CATEGORIES)),
+    )
+    parser.add_argument(
+        "--ms-continuous-categories",
+        default=",".join(sorted(MS_CONTINUOUS_CATEGORIES)),
+    )
+    parser.add_argument(
+        "--ms-event-categories",
+        default=",".join(sorted(MS_EVENT_CATEGORIES)),
+    )
     parser.add_argument("--noise-only-dbfs-min", type=float, default=-38.0)
     parser.add_argument("--noise-only-dbfs-max", type=float, default=-28.0)
     parser.add_argument("--event-snr-min", type=float, default=12.0)
@@ -570,6 +599,26 @@ def main():
         "ooffice": args.far_ooffice_weight,
         "esc_background": args.far_esc_background_weight,
     }
+    args.hvac_source_weights = {
+        "ms_ac": args.hvac_ms_ac_weight,
+        "ooffice": args.hvac_ooffice_weight,
+    }
+    args.background_source_weights = {
+        "ms_continuous": args.background_ms_continuous_weight,
+        "ooffice": args.background_ooffice_weight,
+        "esc_background": args.background_esc_weight,
+    }
+    args.ms_ac_categories = {
+        value.strip() for value in args.ms_ac_categories.split(",") if value.strip()
+    }
+    args.ms_continuous_categories = {
+        value.strip()
+        for value in args.ms_continuous_categories.split(",")
+        if value.strip()
+    }
+    args.ms_event_categories = {
+        value.strip() for value in args.ms_event_categories.split(",") if value.strip()
+    }
     if any(weight < 0.0 for _, weight in args.scene_weights):
         raise ValueError("Scene fractions must be non-negative")
     if any(weight < 0.0 for weight in args.far_background_source_weights.values()):
@@ -579,6 +628,15 @@ def main():
         raise ValueError(
             f"Far background source weights must sum to 1.0, got {far_source_weight_sum}"
         )
+    for label, weights in [
+        ("HVAC", args.hvac_source_weights),
+        ("background", args.background_source_weights),
+    ]:
+        if any(weight < 0.0 for weight in weights.values()):
+            raise ValueError(f"{label} source weights must be non-negative")
+        total = sum(weights.values())
+        if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-6):
+            raise ValueError(f"{label} source weights must sum to 1.0, got {total}")
     scene_weight_sum = sum(weight for _, weight in args.scene_weights)
     if not math.isclose(scene_weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-6):
         raise ValueError(f"Scene fractions must sum to 1.0, got {scene_weight_sum}")
@@ -665,13 +723,13 @@ def main():
     config = vars(args).copy()
     config["scene_weights"] = args.scene_weights
     config["rir_source_weights"] = RIR_SOURCE_WEIGHTS
-    config["hvac_source_weights"] = HVAC_SOURCE_WEIGHTS
-    config["background_source_weights"] = BACKGROUND_SOURCE_WEIGHTS
+    config["hvac_source_weights"] = args.hvac_source_weights
+    config["background_source_weights"] = args.background_source_weights
     config["far_background_source_weights"] = args.far_background_source_weights
     config["event_source_weights"] = EVENT_SOURCE_WEIGHTS
-    config["ms_ac_categories"] = sorted(MS_AC_CATEGORIES)
-    config["ms_continuous_categories"] = sorted(MS_CONTINUOUS_CATEGORIES)
-    config["ms_event_categories"] = sorted(MS_EVENT_CATEGORIES)
+    config["ms_ac_categories"] = sorted(args.ms_ac_categories)
+    config["ms_continuous_categories"] = sorted(args.ms_continuous_categories)
+    config["ms_event_categories"] = sorted(args.ms_event_categories)
     config["esc_background_categories"] = sorted(ESC_BACKGROUND_CATEGORIES)
     config["esc_event_categories"] = sorted(ESC_EVENT_CATEGORIES)
     config["transcript_ids"] = len(transcript_ids)

@@ -2947,3 +2947,56 @@ runs/v6_eval/listening_epoch9/
 方法边界：epoch 7/9 已使用 v6 test 做事后候选比较，因此该 test 不再是最终
 无偏 holdout。若用户接受 epoch 9 听感，下一步冻结模型，不再调参；用新 seed
 生成一套 confirmation 混合做一次最终确认，再决定是否提升为部署候选。
+
+### 17.19 用户否决 v6 声场假设，重置为 continuous-only（2026-07-18）
+
+用户明确否决 v5/v6 的两个核心假设：真实教室不会只有一次孤立键盘、敲门或
+脚步声而没有持续底噪；v5/v6 的听感则落在“降噪太轻”与“降噪较强但损伤
+人声”两个极端。用户要求不再使用这类孤立事件噪声，并对反复使用弱 OOFFICE
+噪声表示不满。
+
+该批评成立。v6 的 event scene 实际是 `speech + one transient`，没有 HVAC/fan
+bed；这会要求模型压制与辅音瞬态相似的结构，增加人声损伤风险。与此同时，
+弱 OOFFICE 与 identity 保护又推动模型保守，形成相互冲突的训练目标。
+
+因此：
+
+```text
+v6 epoch 9 保留为实验 candidate，但用户听感未通过，不提升为正式模型。
+不继续 v6 微调，不生成 confirmation set。
+下一版从数据场景定义重新开始，而不是继续调 event 比例或 checkpoint。
+```
+
+生成器已增加可配置的 MS-SNSD category allowlist，以及 HVAC/background 独立
+source weights；默认值保持历史 v5/v6 行为，显式 continuous-only 参数才启用
+新分布。
+
+新 smoke：`dataset_classroom_v7_continuous_smoke`，400/80/80，定义为：
+
+```text
+identity:       12%
+near HVAC:      38%
+far continuous:25%
+near machine:   23%
+noise-only:      2%
+event:           0%
+
+allowed noise categories: AirConditioner, CopyMachine
+actual noise sources:      ms_ac, ms_continuous
+OOFFICE: 0%; ESC: 0%; event files/categories: 0
+near SNR: 75% 8-15 dB, 25% 4-8 dB
+far SNR:  75% 6-11 dB, 25% 4-6 dB
+```
+
+审计通过：speaker/room/noise/event 跨 split 重叠全部为 0；1120 个 WAV 中抽查
+100 个，格式、长度、峰值、静音、非有限数值全部正常。训练 metadata 明确显示
+event_category 为空，noise_source 仅 `ms_ac/ms_continuous`。
+
+试听目录：
+
+```text
+dataset_classroom_v7_continuous_smoke/listening_samples/
+```
+
+包含 AirConditioner/CopyMachine 各自的 near/far、typical/low，每组仅比较
+`_noisy.wav` 输入和 `_clean.wav` 目标。用户确认该声场以前不训练任何新模型。
