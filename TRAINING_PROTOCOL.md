@@ -2756,3 +2756,33 @@ dataset_classroom_v6_denoise_smoke_b/listening_samples/
 由于 event/background/identity 的源文件和参数未变，本轮只需复听 `hvac_*` 和
 `far_*`。确认后才生成正式 12000/1200/1200 数据、建立 event/HVAC/far/
 background 独立验证域，并提供用户终端训练命令。
+
+### 17.15 far SNR 独立分布 smoke_c（2026-07-18）
+
+用户复听 smoke_b 后认为 `far_typical_noisy.wav` 的噪声仍很小。该文件实际
+SNR 约 17.2 dB；继续使用单一 offset 会把 low 样本一起推到过低 SNR，因此
+生成器新增 far 专用双峰分布，而不是继续整体平移：
+
+```text
+75% far samples: 8-14 dB
+25% far samples: 5-8 dB
+```
+
+默认不提供四个 far 专用边界时，生成器仍保持 v5 原行为。新参数必须四个一起
+提供，并检查 `low_min <= low_max <= main_min <= main_max`。
+
+第三版 `dataset_classroom_v6_denoise_smoke_c` 已生成 300/60/60 并通过审计；
+split overlap 全部为 0。相同试听文件现在为：
+
+```text
+far_low:      6.98 dB（smoke_b 为 7.64 dB）
+far_typical: 12.91 dB（smoke_b 为 17.19 dB）
+```
+
+只需试听：
+
+```text
+dataset_classroom_v6_denoise_smoke_c/listening_far/
+```
+
+本轮仍不生成正式数据、不训练模型；等待用户确认 far 强度。

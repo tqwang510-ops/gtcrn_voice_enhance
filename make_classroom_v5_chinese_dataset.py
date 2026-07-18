@@ -184,6 +184,19 @@ def sample_snr_db(args, rng, offset_db=0.0):
     return rng.uniform(args.snr_low_min, args.snr_low_max) + offset_db
 
 
+def sample_scene_snr_db(scene_type, args, rng):
+    if scene_type == "far_speech" and args.far_snr_main_min is not None:
+        if rng.random() < args.far_snr_main_fraction:
+            return rng.uniform(args.far_snr_main_min, args.far_snr_main_max)
+        return rng.uniform(args.far_snr_low_min, args.far_snr_low_max)
+    offsets = {
+        "far_speech": args.far_snr_offset_db,
+        "hvac_noise": args.hvac_snr_offset_db,
+        "noise_no_rir": args.background_snr_offset_db,
+    }
+    return sample_snr_db(args, rng, offsets.get(scene_type, 0.0))
+
+
 def speech_level_dbfs(scene_type, args, rng):
     if scene_type == "identity":
         if rng.random() < args.identity_native_fraction:
@@ -355,7 +368,7 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
             noisy = speech_component.astype(np.float32)
             noise_source, noise_entry = pick_noise(background, BACKGROUND_SOURCE_WEIGHTS, rng)
             background_wav, noise_start = prepare_background(noise_entry, samples, args, rng)
-            background_snr = sample_snr_db(args, rng, args.far_snr_offset_db)
+            background_snr = sample_scene_snr_db(scene_type, args, rng)
             target_noise_rms = rms(noisy) / (10.0 ** (background_snr / 20.0))
             noisy = noisy + background_wav * (target_noise_rms / (rms(background_wav) + 1e-12))
         elif scene_type == "identity":
@@ -371,12 +384,7 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
                 weights = HVAC_SOURCE_WEIGHTS if scene_type == "hvac_noise" else BACKGROUND_SOURCE_WEIGHTS
                 noise_source, noise_entry = pick_noise(pools, weights, rng)
                 background_wav, noise_start = prepare_background(noise_entry, samples, args, rng)
-                snr_offset = (
-                    args.hvac_snr_offset_db
-                    if scene_type == "hvac_noise"
-                    else args.background_snr_offset_db
-                )
-                background_snr = sample_snr_db(args, rng, snr_offset)
+                background_snr = sample_scene_snr_db(scene_type, args, rng)
                 target_noise_rms = rms(noisy) / (10.0 ** (background_snr / 20.0))
                 noisy = noisy + background_wav * (target_noise_rms / (rms(background_wav) + 1e-12))
             elif scene_type == "noise_only":
@@ -511,6 +519,11 @@ def main():
     parser.add_argument("--far-snr-offset-db", type=float, default=0.0)
     parser.add_argument("--hvac-snr-offset-db", type=float, default=0.0)
     parser.add_argument("--background-snr-offset-db", type=float, default=0.0)
+    parser.add_argument("--far-snr-main-fraction", type=float, default=0.75)
+    parser.add_argument("--far-snr-main-min", type=float, default=None)
+    parser.add_argument("--far-snr-main-max", type=float, default=None)
+    parser.add_argument("--far-snr-low-min", type=float, default=None)
+    parser.add_argument("--far-snr-low-max", type=float, default=None)
     parser.add_argument("--noise-only-dbfs-min", type=float, default=-38.0)
     parser.add_argument("--noise-only-dbfs-max", type=float, default=-28.0)
     parser.add_argument("--event-snr-min", type=float, default=12.0)
@@ -552,6 +565,22 @@ def main():
     scene_weight_sum = sum(weight for _, weight in args.scene_weights)
     if not math.isclose(scene_weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-6):
         raise ValueError(f"Scene fractions must sum to 1.0, got {scene_weight_sum}")
+    far_snr_values = [
+        args.far_snr_main_min,
+        args.far_snr_main_max,
+        args.far_snr_low_min,
+        args.far_snr_low_max,
+    ]
+    if any(value is not None for value in far_snr_values):
+        if any(value is None for value in far_snr_values):
+            raise ValueError("All four dedicated far SNR bounds must be provided together")
+        if not 0.0 <= args.far_snr_main_fraction <= 1.0:
+            raise ValueError("--far-snr-main-fraction must be in [0, 1]")
+        if not (
+            args.far_snr_low_min <= args.far_snr_low_max
+            <= args.far_snr_main_min <= args.far_snr_main_max
+        ):
+            raise ValueError("Far SNR bounds must satisfy low_min <= low_max <= main_min <= main_max")
     args.min_gap_samples = int(round(args.gap_min_seconds * args.fs))
     args.max_gap_samples = int(round(args.gap_max_seconds * args.fs))
 
