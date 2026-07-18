@@ -32,6 +32,8 @@ New baseline evaluations made after the validation-accounting repair should incl
 - `v4_current_sampled.json`: v4, final SNR data, repaired validation sampling.
 - `v5_current_sampled.json`: v5 epoch 3 (`best.tar`) on the same files.
 - `v5_epoch5_current_sampled.json`: v5 epoch 5 candidate on the same files.
+- `v5_on_v6_baseline.json`: v5 epoch 3 baseline on the final v6 eight-domain
+  validation protocol.
 
 ## Epoch 5 candidate audit
 

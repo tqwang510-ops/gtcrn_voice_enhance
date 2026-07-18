@@ -2816,3 +2816,64 @@ dataset_classroom_v6_denoise_smoke_d/listening_far/
 ```
 
 用户确认这两类 far 输入后才锁定正式数据配置。
+
+### 17.17 v6 正式数据、八域门槛与用户训练命令（2026-07-18）
+
+用户确认 smoke_d 符合听感要求。使用完全相同的参数生成正式数据：
+
+```text
+dataset: dataset_classroom_v6_denoise/generated
+train/valid/test: 12000/1200/1200
+duration: 13.33/1.33/1.33 小时，共 16.0 小时
+train speakers: 340
+train rooms: 25
+train RIR files: 1208
+train noise/event files: 170/69
+scene counts: event 3089, HVAC 2977, far 2360, background 1778,
+              identity 1182, noise-only 614
+background SNR: 4.00-20.00 dB，median 10.08
+event SNR: 6.00-18.00 dB，median 11.98
+RT60: 0.16-0.55 s，median 0.33
+speaker/room/noise/event split overlap: 全部 0
+500 WAV format/length/nonfinite/peak/silence audit: 通过
+```
+
+同参数 5/3/3 双份复现检查：除 `config.json` 中输出目录不同外，其余 29 个
+文件（全部 WAV、CSV、manifest）SHA256 完全一致。
+
+新增 `validation_domains_v6.json`，不再使用一个 zh_noisy 平均值，而是八域：
+
+```text
+v6_far / v6_hvac / v6_event / v6_background
+zh_clean_raw / zh_clean_norm
+v4_nonclean / voicebank
+```
+
+event selection weight 为 1.25，其余为 1.0。当前 v5 epoch 3 在正式 v6 valid
+上的基线：
+
+| domain | SI-SNR change | PESQ change | STOI change |
+|---|---:|---:|---:|
+| v6_far | +0.308 | +0.109 | +0.00065 |
+| v6_hvac | +0.696 | +0.141 | +0.00465 |
+| v6_event | +0.023 | +0.017 | -0.00129 |
+| v6_background | +1.097 | +0.188 | +0.00970 |
+| v4_nonclean | +1.210 | +0.249 | +0.01317 |
+| voicebank | +4.740 | +0.352 | +0.01290 |
+
+clean raw/norm SI-SNR P10 为 45.94/27.76 dB。门槛锚定上述基线并要求 event
+至少达到 SI-SNR +0.05、PESQ +0.02；因此初始化 v5 只有 event 域 FAIL，训练
+必须实际改善 event 才能保存 `best.tar`。clean、v4、VoiceBank 均有硬保护线。
+
+**不从头训练**：从 v5 epoch 3 加载模型权重，但不恢复 optimizer。使用
+`lr=2e-5`、12 epoch、early stopping patience 4、frozen BN；每 epoch 12000
+items = 60% v6 non-identity + 15% identity + 25% VoiceBank replay。
+
+在 Windows CMD 的 `(work) D:\modeltraining\gtcrn>` 中粘贴下面完整一行：
+
+```cmd
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py --train-noisy ..\dataset_classroom_v6_denoise\generated\train\noisy --train-clean ..\dataset_classroom_v6_denoise\generated\train\clean --valid-noisy ..\dataset_classroom_v6_denoise\generated\valid\noisy --valid-clean ..\dataset_classroom_v6_denoise\generated\valid\clean --train-metadata-csv ..\dataset_classroom_v6_denoise\generated\metadata\train.csv --valid-metadata-csv ..\dataset_classroom_v6_denoise\generated\metadata\valid.csv --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json --replay-fraction 0.25 --clean-fraction 0.15 --clean-scene-type identity --epoch-size 12000 --validation-domains validation_domains_v6.json --out-dir runs\classroom_v6_denoise --segment-seconds 4 --epochs 12 --batch-size 8 --lr 2e-5 --scheduler none --num-workers 4 --identity-loss-weight 0.1 --freeze-batchnorm --save-every-epoch --early-stopping-patience 4 --init-checkpoint runs\classroom_v5_chinese\checkpoints\best.tar --seed 20260718
+```
+
+已用同一命令将 `--epochs 12` 临时改为 `--epochs 0` 做只加载检查：CUDA、
+STFT、所有数据路径、八域验证、replay 和 init checkpoint 均正常，未执行训练。
