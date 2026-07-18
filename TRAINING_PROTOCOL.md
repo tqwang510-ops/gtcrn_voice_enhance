@@ -2705,3 +2705,54 @@ dataset_classroom_v6_denoise_smoke/listening_samples/
 每组 `_noisy.wav` 是模型未来输入，`_clean.wav` 是目标。此阶段重点判断噪声是否
 过强、是否仍能听清语音、event 是否符合教室桌椅/脚步/键盘/敲门的预期。用户
 确认 smoke 数据分布以前，不生成正式数据、不启动训练。
+
+### 17.14 为什么英文降噪更强、是否需要从头训练（2026-07-18）
+
+用户确认 v6 第一版 smoke：event 清楚且强度正常，background 正是目标效果，
+identity 正常；但 `hvac_low` 过强或源语音本身过小、发闷，far 的噪声又偏小。
+
+英文效果较好不应归因为“英文比中文容易”，主要差别是训练条件：
+
+```text
+VoiceBank serious:
+  10235 个严格配对的近讲 clean/noisy 文件
+  clean 参考更接近真正干声
+  2 秒 segment，lr 1e-3，最多 50 epoch
+
+官方 GTCRN 预训练：
+  DNS3 + VCTK-DEMAND，已经学习大量通用噪声抑制
+
+中文 v5：
+  AISHELL target 带原生房间感，部分源录音低电平或音色偏闷
+  lr 1e-5，只训练到 epoch 6
+  15% clean identity + clean 硬门槛，首先修复“不破坏中文”
+  noisy 场景偏温和，并被合并成一个验证平均值
+```
+
+因此 v5 更像“中文透明度域适配”，不是一次完整的强降噪训练。当前 AISHELL
+正式训练数据约 8.9 小时，也远不足以替代 DNS3/VCTK-DEMAND 预训练后从零学习。
+
+**结论：不从头训练。** v6 应从 v5 epoch 3 初始化，只加载模型权重并新建
+optimizer；这样保留通用降噪和已修好的中文透明度，再用更强且按场景验证的中文
+数据做 denoise repair。从零训练只会增加数据量、训练时间和 clean 退化风险。
+
+按用户试听生成第二版 smoke：`dataset_classroom_v6_denoise_smoke_b`。
+
+```text
+event:       保持 6-18 dB、peak ratio 1.2
+background:  保持 v5 -4 dB offset（用户已确认）
+HVAC:        从 -3 dB 放缓到 -2 dB offset
+far speech:  从 0 改为 -3 dB offset
+identity:    不变
+```
+
+smoke_b 仍为 300/60/60，审计通过，所有 split overlap 为 0；background SNR
+整体 4.08-19.84 dB、中位数 12.04 dB。新试听位于：
+
+```text
+dataset_classroom_v6_denoise_smoke_b/listening_samples/
+```
+
+由于 event/background/identity 的源文件和参数未变，本轮只需复听 `hvac_*` 和
+`far_*`。确认后才生成正式 12000/1200/1200 数据、建立 event/HVAC/far/
+background 独立验证域，并提供用户终端训练命令。
