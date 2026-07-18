@@ -423,9 +423,11 @@ def domain_scene_files(
     exclude_scene_types,
     require_nonempty_fields=None,
     require_empty_fields=None,
+    numeric_filters=None,
 ):
     require_nonempty_fields = require_nonempty_fields or []
     require_empty_fields = require_empty_fields or []
+    numeric_filters = numeric_filters or {}
     names = []
     with open(metadata_csv, "r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
@@ -437,6 +439,21 @@ def domain_scene_files(
             if any(not row.get(field, "").strip() for field in require_nonempty_fields):
                 continue
             if any(row.get(field, "").strip() for field in require_empty_fields):
+                continue
+            numeric_match = True
+            for field, limits in numeric_filters.items():
+                raw_value = row.get(field, "").strip()
+                if not raw_value:
+                    numeric_match = False
+                    break
+                value = float(raw_value)
+                if limits.get("min") is not None and value < float(limits["min"]):
+                    numeric_match = False
+                    break
+                if limits.get("max") is not None and value > float(limits["max"]):
+                    numeric_match = False
+                    break
+            if not numeric_match:
                 continue
             names.append(row["file"])
     if not names:
@@ -453,6 +470,7 @@ def build_domain_dataset(domain, args):
             domain.get("exclude_scene_types") or [],
             domain.get("require_nonempty_fields") or [],
             domain.get("require_empty_fields") or [],
+            domain.get("numeric_filters") or {},
         )
     elif domain.get("manifest"):
         files = load_manifest(domain["manifest"])

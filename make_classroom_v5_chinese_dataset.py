@@ -179,14 +179,20 @@ def sample_scene_type(rng, scene_weights):
 
 
 def sample_snr_db(args, rng, offset_db=0.0):
-    if rng.random() < args.snr_main_fraction:
+    roll = rng.random()
+    if roll < args.snr_high_fraction:
+        return rng.uniform(args.snr_high_min, args.snr_high_max) + offset_db
+    if roll < args.snr_high_fraction + args.snr_main_fraction:
         return rng.uniform(args.snr_main_min, args.snr_main_max) + offset_db
     return rng.uniform(args.snr_low_min, args.snr_low_max) + offset_db
 
 
 def sample_scene_snr_db(scene_type, args, rng):
     if scene_type == "far_speech" and args.far_snr_main_min is not None:
-        if rng.random() < args.far_snr_main_fraction:
+        roll = rng.random()
+        if roll < args.far_snr_high_fraction:
+            return rng.uniform(args.far_snr_high_min, args.far_snr_high_max)
+        if roll < args.far_snr_high_fraction + args.far_snr_main_fraction:
             return rng.uniform(args.far_snr_main_min, args.far_snr_main_max)
         return rng.uniform(args.far_snr_low_min, args.far_snr_low_max)
     offsets = {
@@ -530,6 +536,9 @@ def main():
     parser.add_argument("--snr-main-max", type=float, default=22.0)
     parser.add_argument("--snr-low-min", type=float, default=8.0)
     parser.add_argument("--snr-low-max", type=float, default=12.0)
+    parser.add_argument("--snr-high-fraction", type=float, default=0.0)
+    parser.add_argument("--snr-high-min", type=float, default=22.0)
+    parser.add_argument("--snr-high-max", type=float, default=30.0)
     parser.add_argument("--far-snr-offset-db", type=float, default=0.0)
     parser.add_argument("--hvac-snr-offset-db", type=float, default=0.0)
     parser.add_argument("--background-snr-offset-db", type=float, default=0.0)
@@ -538,6 +547,9 @@ def main():
     parser.add_argument("--far-snr-main-max", type=float, default=None)
     parser.add_argument("--far-snr-low-min", type=float, default=None)
     parser.add_argument("--far-snr-low-max", type=float, default=None)
+    parser.add_argument("--far-snr-high-fraction", type=float, default=0.0)
+    parser.add_argument("--far-snr-high-min", type=float, default=None)
+    parser.add_argument("--far-snr-high-max", type=float, default=None)
     parser.add_argument("--far-ms-continuous-weight", type=float, default=0.45)
     parser.add_argument("--far-ooffice-weight", type=float, default=0.35)
     parser.add_argument("--far-esc-background-weight", type=float, default=0.20)
@@ -586,6 +598,21 @@ def main():
     parser.add_argument("--log-interval", type=int, default=200)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
+    if not 0.0 <= args.snr_high_fraction <= 1.0:
+        raise ValueError("--snr-high-fraction must be in [0, 1]")
+    if args.snr_main_fraction + args.snr_high_fraction > 1.0:
+        raise ValueError("--snr-main-fraction + --snr-high-fraction must be <= 1")
+    if not (
+        args.snr_low_min
+        <= args.snr_low_max
+        <= args.snr_main_min
+        <= args.snr_main_max
+    ):
+        raise ValueError("SNR bounds must satisfy low range <= main range")
+    if args.snr_high_fraction > 0.0 and not (
+        args.snr_main_max <= args.snr_high_min <= args.snr_high_max
+    ):
+        raise ValueError("SNR bounds must satisfy main range <= high range")
     args.scene_weights = [
         ("identity", args.identity_fraction),
         ("hvac_noise", args.hvac_fraction),
@@ -651,11 +678,28 @@ def main():
             raise ValueError("All four dedicated far SNR bounds must be provided together")
         if not 0.0 <= args.far_snr_main_fraction <= 1.0:
             raise ValueError("--far-snr-main-fraction must be in [0, 1]")
+        if not 0.0 <= args.far_snr_high_fraction <= 1.0:
+            raise ValueError("--far-snr-high-fraction must be in [0, 1]")
+        if args.far_snr_main_fraction + args.far_snr_high_fraction > 1.0:
+            raise ValueError(
+                "--far-snr-main-fraction + --far-snr-high-fraction must be <= 1"
+            )
         if not (
             args.far_snr_low_min <= args.far_snr_low_max
             <= args.far_snr_main_min <= args.far_snr_main_max
         ):
             raise ValueError("Far SNR bounds must satisfy low_min <= low_max <= main_min <= main_max")
+        if args.far_snr_high_fraction > 0.0:
+            if args.far_snr_high_min is None or args.far_snr_high_max is None:
+                raise ValueError(
+                    "Far high SNR bounds are required when --far-snr-high-fraction > 0"
+                )
+            if not (
+                args.far_snr_main_max
+                <= args.far_snr_high_min
+                <= args.far_snr_high_max
+            ):
+                raise ValueError("Far SNR bounds must satisfy main range <= high range")
     args.min_gap_samples = int(round(args.gap_min_seconds * args.fs))
     args.max_gap_samples = int(round(args.gap_max_seconds * args.fs))
 

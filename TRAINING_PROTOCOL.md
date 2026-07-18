@@ -3169,3 +3169,69 @@ PRESTO、PCAFETER；05-06 为 far；07 为 identity；08 为最差 SI-SNR 样本
 08 是否真实听感退化。若整体通过，停止继续调训练数据，运行 v4/v2/VoiceBank
 完整回归和流式 center 一致性测试，再决定是否提升为部署候选；若不通过，只按
 具体失败场景诊断，不立即从头训练。
+
+### 17.23 v7 听感失败原因与 v7.1 三档 SNR smoke（2026-07-18）
+
+用户试听认为 v7 整体降噪偏弱，而少数降噪明显样本又损伤人声。复核正式数据
+`config.json` 后发现，v7 正式集没有使用此前试听确认的 continuous smoke SNR：
+
+```text
+计划/试听 smoke near: 75% 8-15 dB, 25% 4-8 dB
+计划/试听 smoke far:  75% 6-11 dB, 25% 4-6 dB
+
+v7 正式实际 near/far: 75% 12-22 dB, 25% 8-12 dB
+训练 metadata 实际范围: 8.00-22.00 dB, median 15.42 dB
+```
+
+原因是生成正式数据的命令没有显式传递 SNR 参数，回落到了 v5 生成器默认值；
+far 专用 SNR 参数也未传，因此 far 同样使用较安静的全局分布。这解释了模型为何
+大部分时候降噪偏弱。旧审计只确认数值合法，没有比较 smoke 与正式 config，未能
+发现该偏差。v7 保留为失败实验，不作为部署候选。
+
+同时，v7 test 中高输入 SNR 样本存在明显左尾，例如 `test_000480.wav` 输入
+SI-SNR 约 21.48 dB，增强后 SI-SNR change 为 -10.77 dB。这说明只增加低 SNR
+样本会推动模型更激进，不能解决“弱降噪与人声损伤”并存的问题。
+
+生成器已加入向后兼容的第三档 high SNR；不提供新参数时旧命令行为不变。
+v7.1 固定分布为：
+
+```text
+near low:  20%, 4-8 dB
+near main: 60%, 8-15 dB
+near high: 20%, 15-24 dB
+
+far low:   25%, 4-6 dB
+far main:  60%, 6-11 dB
+far high:  15%, 11-18 dB
+```
+
+训练验证 metadata 过滤也增加 `numeric_filters`，后续可以分别建立 low-SNR
+降噪域和 high-SNR do-no-harm 域，不再只看场景平均值。
+
+v7.1 smoke 位于：
+
+```text
+D:\modeltraining\dataset_classroom_v7_1_smoke\generated
+```
+
+规模 400/80/80，叠加 146 条 PRESTO/PCAFETER。审计结果：
+
+```text
+background SNR: 4.08-23.53 dB, median 10.31 dB
+HVAC train low/main/high: 37/78/27
+machine train low/main/high: 21/48/20
+far train low/main/high: 22/58/21
+speaker/room/noise/event split overlap: 0
+1120 WAV format/length/nonfinite/peak/silence audit: pass
+numeric validation filter <=8 dB / >=15 dB: verified
+```
+
+输入试听目录：
+
+```text
+D:\modeltraining\dataset_classroom_v7_1_smoke\listening_samples
+```
+
+01-03 为 HVAC low/main/high，04-06 为机器 low/main/high，07-09 为 far
+low/main/high，10 为讨论声，11 为 identity。当前只确认数据强度；用户确认以前
+不生成正式 v7.1、不启动任何训练。
