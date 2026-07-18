@@ -405,6 +405,194 @@ def clean_gate_passed(metrics, args):
     )
 
 
+def load_validation_domains(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    domains = config.get("domains") if isinstance(config, dict) else config
+    if not domains:
+        raise ValueError(f"Validation domains file {path} has no domains")
+    names = [domain["name"] for domain in domains]
+    if len(set(names)) != len(names):
+        raise ValueError(f"Duplicate validation domain names: {names}")
+    return domains
+
+
+def domain_scene_files(metadata_csv, include_scene_types, exclude_scene_types):
+    names = []
+    with open(metadata_csv, "r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            scene = row.get("scene_type", "")
+            if include_scene_types and scene not in include_scene_types:
+                continue
+            if exclude_scene_types and scene in exclude_scene_types:
+                continue
+            names.append(row["file"])
+    if not names:
+        raise ValueError(f"No files left after scene filtering in {metadata_csv}")
+    return names
+
+
+def build_domain_dataset(domain, args):
+    files = None
+    if domain.get("metadata_csv"):
+        files = domain_scene_files(
+            domain["metadata_csv"],
+            domain.get("include_scene_types") or [],
+            domain.get("exclude_scene_types") or [],
+        )
+    elif domain.get("manifest"):
+        files = load_manifest(domain["manifest"])
+    max_files = int(domain.get("max_files", 0))
+    if files is not None and max_files and len(files) > max_files:
+        files = list(files)
+        sample_seed = int(domain.get("sample_seed", args.seed))
+        random.Random(sample_seed).shuffle(files)
+        files = files[:max_files]
+    return PairedWavDataset(
+        domain["noisy"],
+        domain["clean"],
+        args.fs,
+        args.segment_seconds,
+        manifest="" if files is not None else domain.get("manifest", ""),
+        training=False,
+        seed=args.seed,
+        min_clean_rms_db=args.min_clean_rms_db,
+        segment_attempts=args.segment_attempts,
+        valid_candidates=args.valid_candidates,
+        max_files=0 if files is not None else max_files,
+        files=files,
+        identity=bool(domain.get("identity", False)),
+    )
+
+
+def run_domain_validation(model, loader, loss_fn, device, args, identity):
+    from pesq import NoUtterancesError, pesq
+    from pystoi import stoi
+
+    model.eval()
+    total_loss = 0.0
+    total_items = 0
+    si_snr_values = []
+    si_snr_changes = []
+    pesq_changes = []
+    stoi_changes = []
+    pesq_skipped_no_utterances = 0
+    with torch.no_grad():
+        for noisy, clean, identity_flag in loader:
+            noisy = noisy.to(device, non_blocking=True)
+            clean = clean.to(device, non_blocking=True)
+            identity_flag = identity_flag.to(device, non_blocking=True)
+            noisy_stft = wav_to_stft(
+                noisy, args.n_fft, args.hop_length, args.win_length, center=args.center
+            )
+            clean_stft = wav_to_stft(
+                clean, args.n_fft, args.hop_length, args.win_length, center=args.center
+            )
+            enhanced_stft = model(noisy_stft)
+            loss = batch_loss(enhanced_stft, clean_stft, identity_flag, loss_fn, args)
+            enhanced = stft_to_wav(
+                enhanced_stft,
+                args.n_fft,
+                args.hop_length,
+                args.win_length,
+                length=noisy.shape[-1],
+                center=args.center,
+            )
+            batch_items = noisy.shape[0]
+            total_loss += loss.item() * batch_items
+            total_items += batch_items
+            for item in range(batch_items):
+                input_wav = noisy[item].detach().cpu().numpy()
+                clean_wav = clean[item].detach().cpu().numpy()
+                enhanced_wav = enhanced[item].detach().cpu().numpy()
+                si_snr_values.append(si_snr_db(enhanced_wav, clean_wav))
+                if not identity:
+                    si_snr_changes.append(
+                        si_snr_db(enhanced_wav, clean_wav)
+                        - si_snr_db(input_wav, clean_wav)
+                    )
+                try:
+                    input_pesq = float(pesq(args.fs, clean_wav, input_wav, "wb"))
+                    enhanced_pesq = float(pesq(args.fs, clean_wav, enhanced_wav, "wb"))
+                    pesq_changes.append(enhanced_pesq - input_pesq)
+                except NoUtterancesError:
+                    pesq_skipped_no_utterances += 1
+                input_stoi = float(stoi(clean_wav, input_wav, args.fs, extended=False))
+                enhanced_stoi = float(
+                    stoi(clean_wav, enhanced_wav, args.fs, extended=False)
+                )
+                if not (math.isfinite(input_stoi) and math.isfinite(enhanced_stoi)):
+                    raise ValueError("STOI returned a non-finite value during domain validation")
+                stoi_changes.append(enhanced_stoi - input_stoi)
+    metrics = {
+        "loss": total_loss / max(1, total_items),
+        "si_snr_db": float(np.mean(si_snr_values)),
+        "pesq_change": float(np.mean(pesq_changes)) if pesq_changes else float("nan"),
+        "stoi_change": float(np.mean(stoi_changes)) if stoi_changes else float("nan"),
+        "items": total_items,
+        "pesq_items": len(pesq_changes),
+        "pesq_skipped_no_utterances": pesq_skipped_no_utterances,
+        "stoi_items": len(stoi_changes),
+    }
+    if si_snr_values:
+        metrics["si_snr_median_db"] = float(np.median(si_snr_values))
+        metrics["si_snr_p10_db"] = float(np.percentile(si_snr_values, 10))
+        metrics["si_snr_below_20_db_fraction"] = float(
+            np.mean(np.asarray(si_snr_values) < 20.0)
+        )
+        metrics["si_snr_below_30_db_fraction"] = float(
+            np.mean(np.asarray(si_snr_values) < 30.0)
+        )
+    if not identity:
+        metrics["si_snr_change"] = float(np.mean(si_snr_changes))
+    return metrics
+
+
+def domain_gate_passed(metrics, gate):
+    lower_bounds = [
+        ("min_si_snr_db", "si_snr_db"),
+        ("min_si_snr_change", "si_snr_change"),
+        ("min_pesq_change", "pesq_change"),
+        ("min_stoi_change", "stoi_change"),
+        ("min_si_snr_p10_db", "si_snr_p10_db"),
+    ]
+    for gate_key, metric_key in lower_bounds:
+        threshold = gate.get(gate_key)
+        if threshold is None:
+            continue
+        value = metrics.get(metric_key)
+        if value is None or not math.isfinite(value) or value < threshold:
+            return False
+    threshold = gate.get("max_loss")
+    if threshold is not None:
+        value = metrics.get("loss")
+        if value is None or not math.isfinite(value) or value > threshold:
+            return False
+    return True
+
+
+def domain_selection_value(metrics, domain):
+    selection = domain.get("selection")
+    if not selection:
+        return metrics["loss"]
+    metric_name = selection["metric"]
+    value = metrics.get(metric_name)
+    if value is None or not math.isfinite(value):
+        raise ValueError(
+            f"Selection metric {metric_name!r} is unavailable for domain {domain['name']!r}"
+        )
+    scale = float(selection.get("scale", 1.0))
+    if scale <= 0.0:
+        raise ValueError(f"Selection scale must be positive for domain {domain['name']!r}")
+    reference = float(selection.get("reference", 0.0))
+    normalized = (value - reference) / scale
+    if selection.get("direction", "max") == "max":
+        return -normalized
+    if selection["direction"] == "min":
+        return normalized
+    raise ValueError(f"Unknown selection direction for domain {domain['name']!r}")
+
+
 def checkpoint_config(args):
     return {
         "fs": args.fs,
@@ -464,20 +652,16 @@ def save_history(path, history):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     fieldnames = ["epoch", "train_loss"]
-    optional_fields = [
-        "primary_valid_loss",
-        "replay_valid_loss",
-        "clean_valid_loss",
-        "clean_si_snr_db",
-        "clean_pesq_change",
-        "clean_stoi_change",
-        "clean_gate_passed",
-        "selection_loss",
-    ]
-    fieldnames.extend(
-        field for field in optional_fields if any(field in row for row in history)
+    trailing = ["valid_loss", "selection_loss", "learning_rate", "seconds"]
+    middle = sorted(
+        key
+        for key in {key for row in history for key in row}
+        if key not in fieldnames + trailing
     )
-    fieldnames.extend(["valid_loss", "learning_rate", "seconds"])
+    fieldnames.extend(middle)
+    fieldnames.extend(
+        field for field in trailing if any(field in row for row in history)
+    )
     with open(temporary, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -631,6 +815,20 @@ def main():
     parser.add_argument("--clean-gate-min-stoi-change", type=float, default=-0.001)
     parser.add_argument("--clean-gate-reference-si-snr", type=float, default=0.0)
     parser.add_argument("--clean-gate-max-si-snr-drop", type=float, default=10.0)
+    parser.add_argument(
+        "--validation-domains",
+        default="",
+        help=(
+            "JSON file listing extra validation domains with per-domain hard "
+            "gates. When set, it replaces the built-in primary/replay/clean "
+            "validation selection logic."
+        ),
+    )
+    parser.add_argument(
+        "--clean-scene-type",
+        default="clean",
+        help="scene_type value treated as clean/identity in metadata CSVs",
+    )
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -686,13 +884,13 @@ def main():
     clean_valid_files = None
     if scene_aware:
         non_clean_train_files = load_scene_files(
-            args.train_metadata_csv, "clean", invert=True
+            args.train_metadata_csv, args.clean_scene_type, invert=True
         )
-        clean_train_files = load_scene_files(args.train_metadata_csv, "clean")
+        clean_train_files = load_scene_files(args.train_metadata_csv, args.clean_scene_type)
         non_clean_valid_files = load_scene_files(
-            args.valid_metadata_csv, "clean", invert=True
+            args.valid_metadata_csv, args.clean_scene_type, invert=True
         )
-        clean_valid_files = load_scene_files(args.valid_metadata_csv, "clean")
+        clean_valid_files = load_scene_files(args.valid_metadata_csv, args.clean_scene_type)
 
     primary_train_set = PairedWavDataset(
         args.train_noisy,
@@ -839,6 +1037,21 @@ def main():
             pin_memory=pin_memory,
             persistent_workers=False,
         )
+    domains = None
+    domain_loaders = None
+    if args.validation_domains:
+        domains = load_validation_domains(args.validation_domains)
+        domain_loaders = [
+            DataLoader(
+                build_domain_dataset(domain, args),
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=False,
+            )
+            for domain in domains
+        ]
 
     model = GTCRN(nfft=args.n_fft, fs=args.fs).to(device)
     loss_fn = HybridLoss(
@@ -925,6 +1138,12 @@ def main():
         run_config["primary_items_per_epoch"] = run_config[
             "non_clean_items_per_epoch"
         ]
+    if domains is not None:
+        run_config["validation_domain_names"] = [domain["name"] for domain in domains]
+        run_config["validation_domain_files"] = {
+            domain["name"]: len(loader.dataset)
+            for domain, loader in zip(domains, domain_loaders)
+        }
     save_json(out_dir / "config.json", run_config)
 
     if start_epoch > args.epochs:
@@ -942,44 +1161,72 @@ def main():
             model, train_loader, loss_fn, optimizer, device, args, training=True
         )
         with torch.no_grad():
-            primary_valid_loss = run_epoch(
-                model, valid_loader, loss_fn, optimizer, device, args, training=False
-            )
-            if replay_valid_loader is not None:
-                replay_valid_loss = run_epoch(
-                    model,
-                    replay_valid_loader,
-                    loss_fn,
-                    optimizer,
-                    device,
-                    args,
-                    training=False,
-                )
-                if clean_valid_loader is not None:
-                    clean_metrics = run_clean_identity_validation(
-                        model, clean_valid_loader, loss_fn, device, args
+            if domain_loaders is not None:
+                domain_metrics = {}
+                selection_loss = 0.0
+                selection_weight = 0.0
+                gate_passed = True
+                for domain, loader in zip(domains, domain_loaders):
+                    metrics = run_domain_validation(
+                        model,
+                        loader,
+                        loss_fn,
+                        device,
+                        args,
+                        bool(domain.get("identity", False)),
                     )
-                    clean_valid_loss = clean_metrics["loss"]
-                    selection_loss = (
-                        args.primary_valid_weight * primary_valid_loss
-                        + args.replay_valid_weight * replay_valid_loss
-                        + args.clean_valid_weight * clean_valid_loss
+                    domain_metrics[domain["name"]] = metrics
+                    weight = float(domain.get("weight", 1.0))
+                    selection_loss += weight * domain_selection_value(metrics, domain)
+                    selection_weight += weight
+                    gate_passed = gate_passed and domain_gate_passed(
+                        metrics, domain.get("gate", {})
                     )
-                    gate_passed = clean_gate_passed(clean_metrics, args)
-                else:
-                    clean_metrics = None
-                    clean_valid_loss = None
-                    gate_passed = True
-                    selection_loss = (
-                        (1.0 - args.replay_fraction) * primary_valid_loss
-                        + args.replay_fraction * replay_valid_loss
-                    )
-            else:
+                selection_loss /= max(selection_weight, 1e-12)
+                primary_valid_loss = selection_loss
                 replay_valid_loss = None
                 clean_metrics = None
                 clean_valid_loss = None
-                gate_passed = True
-                selection_loss = primary_valid_loss
+            else:
+                domain_metrics = None
+                primary_valid_loss = run_epoch(
+                    model, valid_loader, loss_fn, optimizer, device, args, training=False
+                )
+                if replay_valid_loader is not None:
+                    replay_valid_loss = run_epoch(
+                        model,
+                        replay_valid_loader,
+                        loss_fn,
+                        optimizer,
+                        device,
+                        args,
+                        training=False,
+                    )
+                    if clean_valid_loader is not None:
+                        clean_metrics = run_clean_identity_validation(
+                            model, clean_valid_loader, loss_fn, device, args
+                        )
+                        clean_valid_loss = clean_metrics["loss"]
+                        selection_loss = (
+                            args.primary_valid_weight * primary_valid_loss
+                            + args.replay_valid_weight * replay_valid_loss
+                            + args.clean_valid_weight * clean_valid_loss
+                        )
+                        gate_passed = clean_gate_passed(clean_metrics, args)
+                    else:
+                        clean_metrics = None
+                        clean_valid_loss = None
+                        gate_passed = True
+                        selection_loss = (
+                            (1.0 - args.replay_fraction) * primary_valid_loss
+                            + args.replay_fraction * replay_valid_loss
+                        )
+                else:
+                    replay_valid_loss = None
+                    clean_metrics = None
+                    clean_valid_loss = None
+                    gate_passed = True
+                    selection_loss = primary_valid_loss
         valid_loss = selection_loss
         seconds = time.perf_counter() - started
 
@@ -1017,6 +1264,26 @@ def main():
                     "clean_gate_passed": str(bool(gate_passed)).lower(),
                 }
             )
+        if domain_metrics is not None:
+            for domain in domains:
+                name = domain["name"]
+                metrics = domain_metrics[name]
+                row[f"{name}_loss"] = f"{metrics['loss']:.8f}"
+                row[f"{name}_si_snr_db"] = f"{metrics['si_snr_db']:.8f}"
+                if "si_snr_change" in metrics:
+                    row[f"{name}_si_snr_change"] = f"{metrics['si_snr_change']:.8f}"
+                row[f"{name}_pesq_change"] = f"{metrics['pesq_change']:.8f}"
+                row[f"{name}_stoi_change"] = f"{metrics['stoi_change']:.8f}"
+                row[f"{name}_items"] = str(metrics["items"])
+                row[f"{name}_pesq_items"] = str(metrics["pesq_items"])
+                row[f"{name}_pesq_skipped"] = str(
+                    metrics["pesq_skipped_no_utterances"]
+                )
+                row[f"{name}_stoi_items"] = str(metrics["stoi_items"])
+                row[f"{name}_si_snr_p10_db"] = f"{metrics['si_snr_p10_db']:.8f}"
+                row[f"{name}_gate_passed"] = str(
+                    bool(domain_gate_passed(metrics, domain.get("gate", {})))
+                ).lower()
         validation_metrics = {
             "primary_valid_loss": primary_valid_loss,
             "selection_loss": selection_loss,
@@ -1026,6 +1293,9 @@ def main():
         if clean_metrics is not None:
             validation_metrics["clean_identity"] = clean_metrics
             validation_metrics["clean_gate_passed"] = gate_passed
+        if domain_metrics is not None:
+            validation_metrics["domains"] = domain_metrics
+            validation_metrics["domain_gate_passed"] = gate_passed
         history.append(row)
         save_history(metrics_path, history)
         plot_history(out_dir / "training_curve.png", history)
@@ -1082,7 +1352,15 @@ def main():
                 best_selection_loss,
             )
 
-        if replay_valid_loss is None:
+        if domain_metrics is not None:
+            domain_text = " ".join(
+                f"{name}={domain_metrics[name]['loss']:.4f}" for name in domain_metrics
+            )
+            validation_text = (
+                f"{domain_text} selection_loss={selection_loss:.4f} "
+                f"domain_gate={'pass' if gate_passed else 'fail'}"
+            )
+        elif replay_valid_loss is None:
             validation_text = f"valid_loss={valid_loss:.4f}"
         else:
             validation_text = (

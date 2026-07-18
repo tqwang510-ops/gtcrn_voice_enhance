@@ -2301,3 +2301,299 @@ Step 7: 完整评估中文 test、v4/v2 classroom、VoiceBank 和现有试听矩
 
 初始化 checkpoint 在实现 smoke 后再由对照决定：v3 在原始低电平中文上相对
 更稳，v4 在归一化中文和新 classroom 上更好，当前不能只凭单项指标预先指定。
+
+### 17.6 17.5 执行记录（2026-07-17）
+
+执行前发现 `wav_extracted` 的 399/400 个说话人目录 ACL 损坏（全部拒绝访问，
+仅 S0003 可读；非管理员 shell 无法 takeown/icacls）。经 UAC 提权执行
+`takeown /R /D Y` + `icacls /reset /T /C /Q` 后 400/400 恢复可读，142731 个
+文件处理成功、0 失败。损坏原因未定位，数据内容未受影响（损坏只发生在目录
+ACL 层）。
+
+**Step 1（完成）**：新增 `make_classroom_v5_chinese_dataset.py`。官方
+train/dev/test 原样使用（340/40/20 说话人），325 条无转写 WAV 排除并记录到
+`metadata/excluded_no_transcript.csv`。target = AISHELL native_room 原音
+（只做电平缩放/裁剪，永不加 RIR）；identity 场景一半保留原始电平、一半缩放
+到 -28~-22 dBFS；far_speech 场景语音分量与 target 同步降到 -40~-32 dBFS，
+短 RIR 只作用于 input（RT60 限 0.15-0.55 s，wet mix 0.25-0.60，湿干混合后
+按干声 RMS 归一）；背景 SNR 80% 取自 18-32 dB、20% 取自 12-18 dB；事件单次
+放置、SNR 18-30 dB、峰值不超过语音 0.8 倍。噪声池：hvac = MS-SNSD
+AirConditioner + OOFFICE；background = MS-SNSD 持续类 + OOFFICE + ESC
+背景类；事件 = MS-SNSD SqueakyChair/Typing + ESC footsteps/door_wood_knock。
+SqueakyChair 只存在于 MS-SNSD 官方 noise_train，因此只进 train 事件池。
+修复了一个分裂泄漏 bug：AirConditioner 同属 hvac 与 background 两个语义池，
+原先各池独立按不同 seed 拆 valid/test，导致同一 noise_test 文件经不同池同时
+进入 valid 和 test；现改为按类别并集一次拆分、再按语义池过滤。
+
+**Step 2（完成，试听待用户确认）**：`dataset_classroom_v5_chinese_smoke`
+200/40/40 已生成，`audit_classroom_dataset.py` 通过；试听样本在
+`dataset_classroom_v5_chinese_smoke/listening_samples/`（identity 原电平、
+identity 归一化、far_speech 短 RIR 低电平、hvac、事件、noise_no_rir、
+noise_only 共 13 对）。
+
+**Step 3（完成）**：`dataset_classroom_v5_chinese_repro_a/b` 同 seed
+5/3/3 双份再生成，22 个 WAV 哈希完全一致，metadata CSV/manifest 一致。
+结论同样只覆盖该小样本。
+
+**Step 4（完成）**：正式数据 `dataset_classroom_v5_chinese/generated`
+8000/800/800（8.89/0.89/0.89 小时），审计通过：
+
+```text
+speaker/room/noise/event 跨 split 重叠: 全部 0
+scene 分布: far_speech 2427, hvac 1996, noise_no_rir 1237,
+           event 1205, identity 742, noise_only 393
+RT60: 0.16-0.55 s (median 0.33)
+背景 SNR: 12.0-32.0 dB (median 23.2)
+事件 SNR: 18.0-30.0 dB
+train 说话人: 340, RIR 文件: 1243, 噪声文件: 170, 事件文件: 69
+语音活性: min 0.435, median 0.815
+```
+
+**Step 5（代码完成）**：`train_custom.py` 新增 `--validation-domains <json>`，
+按域配置 noisy/clean 目录、scene 过滤、identity 标记、max_files、weight 和
+硬门槛（min_si_snr_db / min_si_snr_change / min_pesq_change /
+min_stoi_change / max_loss）。启用后替代原 primary/replay/clean 选择逻辑，
+selection_loss 为域 loss 加权平均，best.tar 只在全部域过门槛且 selection
+改善时保存；每域指标和 gate 结果逐 epoch 写入 metrics.csv，
+`--save-every-epoch` 逐 epoch 存 checkpoint；旧训练命令行为不变。另新增
+`--clean-scene-type`（默认 clean，v5 用 identity）和
+`eval_validation_domains.py`（单 checkpoint 全域评估）。PESQ/STOI 对近静音
+片段会抛 NoUtterancesError，域评估按文件跳过失败项。中文 clean 验证对由
+`make_zh_clean_validation.py` 从 AISHELL dev 前 20 位说话人生成 60 对
+identity（raw 原始电平 + normalized -25 dBFS），test 说话人保留给最终评估。
+
+五域基线（`runs/*_v5domains_baseline.json`，正式 JSON，每域 64-128 文件）：
+
+```text
+checkpoint        zh_noisy   zh_clean_raw  zh_clean_norm  v4_nonclean  voicebank
+v3 (si_snr)        8.83 dB     10.86 dB      13.31 dB       6.31 dB     10.64 dB
+v4 (si_snr)        7.21 dB      7.92 dB      13.99 dB       6.55 dB     11.69 dB
+```
+
+v4 域 zh_noisy SI-SNR 相对 input 变化约 -10 dB：现有模型把低电平中文语音
+当噪声压制，这正是 v5 数据要补的缺口。
+
+**Step 6（smoke 完成，正式训练待用户终端）**：v4-init smoke fine-tune
+（`runs/classroom_v5_chinese_smoke`，200/40/40 数据，2 epoch，lr 1e-5，
+frozen BN，clean 0.15 / replay 0.25）管线验证通过，末 epoch：
+
+```text
+zh_noisy       8.63 dB (init 7.21)   gate fail（相对 input 仍 -9.23 dB）
+zh_clean_raw  10.68 dB (init 7.92)   pass
+zh_clean_norm 16.19 dB (init 13.99)  pass
+v4_nonclean    6.68 dB (init 6.55)   pass（改善保留）
+voicebank     10.97 dB (init 11.69)  pass（+5.92 dB 相对 input）
+selection_loss 2.8365 -> 2.2146
+```
+
+（init 对照与正式训练命令见 17.7。）
+
+### 17.7 init 对照结论与正式训练命令（2026-07-18）
+
+v3-init 与 v4-init 在相同 smoke 数据、相同 recipe（2 epoch，lr 1e-5，
+frozen BN，clean 0.15 / replay 0.25）下对照，末 epoch 域指标：
+
+```text
+domain         metric         v3-init   v4-init
+zh_noisy       si_snr          10.59      8.63
+               si_snr_change   -7.28     -9.23
+zh_clean_raw   si_snr          14.17     10.68
+zh_clean_norm  si_snr          16.43     16.19
+v4_nonclean    si_snr           6.63      6.68
+               si_snr_change   +1.76     +1.82
+voicebank      si_snr           9.73     10.97
+               si_snr_change   +4.68     +5.92
+selection_loss                   2.55      2.21
+```
+
+结论：**正式训练以 v3（`runs\classroom_replay_v3\checkpoints\best.tar`）
+初始化**。理由：v5 fine-tune 的目标域是中文，v3-init 三个中文域全胜
+（noisy +1.96 dB、raw +3.48 dB、norm +0.25 dB），且归一化 clean 上 v4 的
+基线优势在 2 个 smoke epoch 后即被反超；v4_nonclean 基本持平；v3-init 在
+VoiceBank 上落后约 1.2 dB，但相对 input 仍保持 +4.68 dB 改善，由 0.25
+replay 比例和 voicebank 硬门槛兜底。smoke 只验证管线与方向，其绝对指标
+不代表正式模型质量。
+
+正式训练硬门槛已写入 `validation_domains_v5.json`（锚定 v3 基线与 smoke
+末 epoch 实测值，留有余量）：
+
+```text
+zh_noisy:      si_snr_change >= -8.0 dB,  stoi_change >= -0.07
+zh_clean_raw:  si_snr >= 10.0 dB,         stoi_change >= -0.09
+zh_clean_norm: si_snr >= 12.0 dB,         stoi_change >= -0.06
+v4_nonclean:   si_snr_change >= +1.0 dB,  stoi_change >= +0.005
+voicebank:     si_snr_change >= +3.0 dB,  stoi_change >= 0.0
+```
+
+best.tar 仅在五个域全部过门槛且加权 selection_loss 改善时保存；任一域
+破门槛时保存 best_selection_candidate.tar 并继续训练。
+
+正式训练命令（用户在终端运行）：
+
+```cmd
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py --train-noisy ..\dataset_classroom_v5_chinese\generated\train\noisy --train-clean ..\dataset_classroom_v5_chinese\generated\train\clean --valid-noisy ..\dataset_classroom_v5_chinese\generated\valid\noisy --valid-clean ..\dataset_classroom_v5_chinese\generated\valid\clean --train-metadata-csv ..\dataset_classroom_v5_chinese\generated\metadata\train.csv --valid-metadata-csv ..\dataset_classroom_v5_chinese\generated\metadata\valid.csv --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json --replay-fraction 0.25 --clean-fraction 0.15 --clean-scene-type identity --epoch-size 10000 --validation-domains validation_domains_v5.json --out-dir runs\classroom_v5_chinese --segment-seconds 4 --epochs 8 --batch-size 8 --lr 1e-5 --scheduler none --num-workers 4 --identity-loss-weight 0.1 --freeze-batchnorm --save-every-epoch --early-stopping-patience 3 --init-checkpoint runs\classroom_replay_v3\checkpoints\best.tar --seed 20260717
+```
+
+Step 7 完整评估（中文 test、v4/v2 classroom、VoiceBank、试听矩阵）在正式
+训练完成后执行。
+
+### 17.8 试听校准：SNR 下调（2026-07-18）
+
+用户试听 smoke 样本后确认：identity 直透正常（AISHELL 原生房间声保留），
+但按 17.4 起始值（SNR 主 18-32 dB）生成的背景太安静，真实教室应更吵。
+按用户选择改为：
+
+```text
+背景 SNR: 75% 取自 12-22 dB, 25% 取自 8-12 dB（原 80% 18-32 / 20% 12-18）
+事件 SNR: 12-24 dB（原 18-30）
+```
+
+同 seed（20260717）重新生成 smoke 与正式 8000/800/800 数据，审计再次通过：
+跨 split 零重叠，场景分布不变，背景 SNR 实测 8.0-22.0（median 15.3），
+事件 SNR 12.0-24.0。试听样本已按新数据刷新到
+`dataset_classroom_v5_chinese_smoke/listening_samples/`。
+17.4 的 SNR 起始值以本节为准。zh_noisy 域门槛在新数据上重新校核（见 17.9）。
+
+### 17.9 zh_noisy 门槛校核与正式训练启动（2026-07-18）
+
+新 SNR 数据上 v3 基线：zh_noisy SI-SNR 7.94 dB、相对 input -4.56 dB、
+stoi_change -0.0706（输入更吵后恶化幅度收窄）。其余四域数据未变，基线同
+17.7。门槛最终定为：
+
+```text
+zh_noisy:      si_snr_change >= -5.5 dB,  stoi_change >= -0.09
+zh_clean_raw:  si_snr >= 10.0 dB,         stoi_change >= -0.09
+zh_clean_norm: si_snr >= 12.0 dB,         stoi_change >= -0.06
+v4_nonclean:   si_snr_change >= +1.0 dB,  stoi_change >= +0.005
+voicebank:     si_snr_change >= +3.0 dB,  stoi_change >= 0.0
+```
+
+用户授权由助手代为启动正式训练（命令同 17.7），输出
+`runs\classroom_v5_chinese`。训练完成后执行 Step 7 完整评估。
+
+### 17.10 Step 7 完整评估结果（2026-07-18）
+
+**训练收敛**：epoch 6 后早停，`best.tar = epoch 3`（selection -2.4251），
+五域门槛 epoch 2-6 全部通过。best epoch 五域 dev 指标：
+
+| 域 | 指标 | v5 (epoch 3) | v3 基线 | v4 基线 |
+|---|---|---|---|---|
+| zh_noisy | SI-SNR dB（change） | 13.39（+0.32） | 7.95（-5.12） | 6.72（-6.35） |
+| zh_clean_raw | SI-SNR dB | 94.95 | 10.86 | 7.92 |
+| zh_clean_norm | SI-SNR dB | 82.04 | 13.31 | 13.99 |
+| v4_nonclean | SI-SNR change dB | +1.39 | +1.54 | +1.75 |
+| voicebank | SI-SNR change dB | +4.49 | +4.51 | +5.80 |
+
+本表已在最终 8-22 dB SNR 数据上，以确定性随机抽取的同一批文件重算；旧版
+表格曾误用 SNR 重构前的 v3/v4 基线，不能作为严格对照。中文三域从严重破坏
+变为通过最低安全线；英文两域仍有正增益，但低于 v4。"过门槛"仅表示没有
+灾难性退化，不等于产品质量认证。
+
+**v5 test（800 条，分场景）**：评估目录 `runs\v5_eval\v5_test`。
+
+| 场景 | n | input SI-SNR | enhanced | change | PESQ+ | STOI+ |
+|---|---|---|---|---|---|---|
+| identity | 75 | 139.43 | 80.86 | （透传） | -0.065 | -0.0025 |
+| far_speech | 247 | 7.35 | 7.39 | +0.04 | +0.131 | +0.0001 |
+| hvac_noise | 201 | 14.87 | 15.19 | +0.32 | +0.125 | +0.0019 |
+| event | 113 | 19.00 | 18.54 | -0.46 | +0.070 | -0.0021 |
+| noise_no_rir | 114 | 15.01 | 15.31 | +0.30 | +0.248 | +0.0070 |
+| noise_only | 50 | — | — | 衰减 15.75 dB | — | — |
+
+identity 中位数透传极好（native 104.7 dB / normalized 91.6 dB），但存在左尾：
+native 最小 18.9 dB（-40 dBFS 轻语音）、normalized 最小 8.2 dB——残余风险点，
+试听矩阵含 worst 样本供人工确认。noisy 场景 SI-SNR 基本持平（新 SNR 区间
+input 已经较干净），PESQ 各场景平均为正。修正评估脚本把 `identity` 错算入
+总体 speech 的问题后，675 条 non-identity speech 的总体 SI-SNR change 为
++0.082 dB，中位数 +0.003 dB，改善占比 77.63%，PESQ change +0.139，
+STOI change +0.00142。
+
+**回归对照（test 集）**：
+
+| 测试集 | 模型 | SI-SNR+ | PESQ+ | STOI+ | 改善占比 | clean 透传 |
+|---|---|---|---|---|---|---|
+| v4 test | v5 | +0.63 | +0.234 | +0.0135 | 90.0% | 109.6 dB |
+| v4 test | v4 | +0.88 | +0.438 | +0.0218 | 80.7% | 49.6 dB |
+| v4 test | v3 | +0.56 | +0.355 | +0.0146 | 73.3% | 76.6 dB |
+| v2 test | v5 | +0.87 | +0.260 | +0.0294 | 95.4% | 103.6 dB |
+| v2 test | v4 | +1.15 | +0.381 | +0.0317 | 84.3% | 42.4 dB |
+| VoiceBank | v5 | +6.12 | +0.427 | +0.0021 | 100% | — |
+| VoiceBank | v4 | +6.66 | +0.648 | +0.0093 | 100% | — |
+| VoiceBank | v2 | +1.69 | +0.362 | +0.0042 | 99.9% | — |
+
+v5 在英文域增益略低于 v4，但改善占比显著更高（90.0%/95.4% vs
+80.7%/84.3%），clean 透传从 50 dB 量级跃升到 100+ dB。
+
+**AISHELL clean 对照（17.3 同口径，同 100 文件）**：评估目录
+`runs\v5_eval\aishell_clean_raw` / `aishell_clean_norm`。
+
+| 输入 | 模型 | SI-SNR dB | PESQ | STOI |
+|---|---|---|---|---|
+| raw | v3 | 10.11 | 2.363 | 0.906 |
+| raw | v4 | 7.92 | 2.407 | 0.882 |
+| raw | repair | 6.95 | 2.178 | 0.827 |
+| raw | **v5** | **101.33** | **4.642** | **1.000** |
+| -25 dBFS | v3 | 12.15 | 2.559 | 0.940 |
+| -25 dBFS | v4 | 13.73 | 3.064 | 0.952 |
+| -25 dBFS | repair | 13.69 | 2.864 | 0.948 |
+| -25 dBFS | **v5** | **78.42** | **4.559** | **0.996** |
+
+17.3 基线中中文 clean 被所有历史模型毁灭性破坏（SI-SNR 仅 7-14 dB、
+PESQ 损失 1.6-2.4）；v5 raw 透传 101 dB、整体增益 -0.0001 dB，normalized
+平均 78 dB。但 normalized 并非只有一个离群点：100 条中 SI-SNR <20 dB
+有 6 条、<30 dB 有 14 条，P10 约 21.3 dB。因此更准确的结论是：大多数
+中文 clean 已透明透传，左尾失真仍需保留为验收项，不能写成问题完全解决。
+
+**试听矩阵**：`runs\v5_eval\listening\`（manifest
+`runs\v5_eval\listening_manifest.json`），13 组 noisy/enhanced/clean 三元组，
+覆盖 identity native/normalized 的 typical+worst、far_speech/hvac/event/
+noise_no_rir 的 typical+低 SNR、noise_only typical。导出脚本
+`export_listening_matrix.py`。
+
+**结论与边界**：17.5 的主要目标（中文域补强、英文域不发生灾难性退化）在
+合成指标上达成，但英文增强幅度低于 v4，中文 clean 仍有左尾离群。
+但所有数据均为合成混合，指标达标不等于真实教室硬件场景验收通过；
+上线前仍需真实设备录音的小规模人工验收。
+
+### 17.11 评估口径修复与 runs 整理（2026-07-18）
+
+审阅 17.10 后完成以下修复：
+
+```text
+1. evaluate_custom.py 将 identity 与 clean 一并作为 clean passthrough，排除出
+   noisy speech 总体汇总；v5 test summary 已由错误的 -5.78 dB 修正为 +0.082 dB。
+2. validation domain 不再截取 metadata/manifest 的前 N 条，改为按 sample_seed
+   确定性随机抽取，避免文件顺序偏差。
+3. PESQ 只跳过明确的 NoUtterancesError；其他异常立即失败。每域记录 items、
+   pesq_items、pesq_skipped_no_utterances 和 stoi_items。
+4. 增加 SI-SNR median、P10、<20 dB 和 <30 dB 比例。clean raw/norm 的 P10
+   硬门槛分别设为 30/20 dB，防止平均值掩盖少量严重失真。
+5. checkpoint selection 改为按域指标缩放后平均，不再直接平均数值尺度差异很大
+   的 HybridLoss。旧训练的 best.tar 不被自动改写。
+```
+
+最终 SNR 数据、同一随机样本上的 v3/v4/v5 epoch 3 结果见 17.10 修正版表格。
+所有域 PESQ/STOI 分母均已记录；v4_nonclean 的 PESQ 为 123/128，有 5 条因
+NoUtterancesError 跳过，其余域均为全量。
+
+按新选择公式复核旧 epoch 2-6 记录时 epoch 5 略优；在修复后的随机验证文件上：
+
+```text
+checkpoint       normalized selection   zh noisy+   raw P10   norm P10   v4+    VB+
+epoch 3 best.tar       -2.4117             +0.324      45.94      27.76   +1.389 +4.489
+epoch 5 candidate      -2.4329             +0.319      41.07      28.48   +1.411 +4.749
+```
+
+越低越好。epoch 5 在英文回放上稍强，但 normalized clean PESQ change 从
+-0.062 降到 -0.084，因此暂不覆盖 `best.tar`；只有重跑完整 v5/v4/v2/VoiceBank/
+AISHELL test 和试听矩阵后，才能决定是否把 epoch 5 提升为正式候选。
+
+`runs/` 根目录的 6 个评估日志和 4 个历史基线 JSON 已整理到：
+
+```text
+runs/v5_eval/logs/
+runs/v5_eval/validation_baselines/
+```
+
+旧 SNR 产物以 `old_snr18_32` 标记，仅保留追溯用途。仓库根目录新增
+`RUNS_INDEX.md`，即使 `runs/` 被 Git 忽略，也能查到各产物的含义和位置。

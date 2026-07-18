@@ -1,0 +1,67 @@
+{
+  "domains": [
+    {
+      "name": "zh_noisy",
+      "noisy": "..\\dataset_classroom_v5_chinese\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v5_chinese\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v5_chinese\\generated\\metadata\\valid.csv",
+      "exclude_scene_types": ["identity", "noise_only"],
+      "max_files": 128,
+      "sample_seed": 2026071701,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": -5.5, "min_stoi_change": -0.09}
+    },
+    {
+      "name": "zh_clean_raw",
+      "noisy": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\raw\\noisy",
+      "clean": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\raw\\clean",
+      "identity": true,
+      "max_files": 64,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_db", "direction": "max", "scale": 20.0},
+      "gate": {
+        "min_si_snr_db": 10.0,
+        "min_si_snr_p10_db": 30.0,
+        "min_stoi_change": -0.09
+      }
+    },
+    {
+      "name": "zh_clean_norm",
+      "noisy": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\normalized\\noisy",
+      "clean": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\normalized\\clean",
+      "identity": true,
+      "max_files": 64,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_db", "direction": "max", "scale": 20.0},
+      "gate": {
+        "min_si_snr_db": 12.0,
+        "min_si_snr_p10_db": 20.0,
+        "min_stoi_change": -0.06
+      }
+    },
+    {
+      "name": "v4_nonclean",
+      "noisy": "..\\dataset_classroom_v4\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v4\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v4\\generated\\metadata\\valid.csv",
+      "exclude_scene_types": ["clean"],
+      "max_files": 128,
+      "sample_seed": 2026071702,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 1.0, "min_stoi_change": 0.005}
+    },
+    {
+      "name": "voicebank",
+      "noisy": "..\\dataset_voicebank_replay_v4\\generated\\valid\\noisy",
+      "clean": "..\\dataset_voicebank_replay_v4\\generated\\valid\\clean",
+      "manifest": "..\\dataset_voicebank_replay_v4\\generated\\metadata\\valid.json",
+      "max_files": 128,
+      "sample_seed": 2026071703,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 3.0},
+      "gate": {"min_si_snr_change": 3.0, "min_stoi_change": 0.0}
+    }
+  ]
+}

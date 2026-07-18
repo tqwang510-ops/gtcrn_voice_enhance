@@ -236,17 +236,20 @@ def main():
                 print(f"evaluated {index}/{len(names)}")
 
     successful_rows = [row for row in rows if not row["error"]]
+    clean_scene_types = {"clean", "identity"}
     if args.metadata_csv:
         valid_rows = [
             row
             for row in successful_rows
-            if row["scene_type"] not in {"clean", "noise_only"}
+            if row["scene_type"] not in clean_scene_types | {"noise_only"}
             and row["clean_rms_dbfs"] >= -50.0
         ]
         noise_only_rows = [
             row for row in successful_rows if row["scene_type"] == "noise_only"
         ]
-        clean_rows = [row for row in successful_rows if row["scene_type"] == "clean"]
+        clean_rows = [
+            row for row in successful_rows if row["scene_type"] in clean_scene_types
+        ]
     else:
         valid_rows = [
             row for row in successful_rows if row["clean_rms_dbfs"] >= -50.0
@@ -262,7 +265,9 @@ def main():
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "checkpoint_epoch": checkpoint.get("epoch"),
         "metadata_csv": str(Path(args.metadata_csv).resolve()) if args.metadata_csv else None,
-        "excluded_speech_scenes": ["clean", "noise_only"] if args.metadata_csv else [],
+        "excluded_speech_scenes": ["clean", "identity", "noise_only"]
+        if args.metadata_csv
+        else [],
         "files": len(rows),
         "files_used_for_summary": len(valid_rows),
         "speech_files": len(valid_rows),
