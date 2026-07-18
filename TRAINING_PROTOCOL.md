@@ -2645,3 +2645,63 @@ runs/v5_epoch5_eval/aishell_clean_norm_compare/listening_epoch5/
 clean 对照选择了 epoch 5 相对 epoch 3 PESQ 退化最大的 5 条。每个文件夹内
 同一 `clean_delta_XX` 的 `_enhanced.wav` 互相比较，并以 `_clean.wav` 为原音参考。
 用户确认听感前不继续跑 v2/v4/VoiceBank 全矩阵，也不启动新训练。
+
+### 17.13 用户试听结论与 v6 denoise repair smoke（2026-07-18）
+
+用户对 epoch 3/5 的试听结论：
+
+```text
+event:       降噪能力很弱
+far_speech:  降噪尚可
+hvac_noise:  降噪尚可，但语音有轻微损伤感
+其他场景:    噪声残留不够干净，整体不如早期英文训练模型
+```
+
+该反馈与指标一致。v5 的主要成功是中文 clean 透明度修复，non-identity test
+SI-SNR 仅提高约 +0.08~+0.11 dB；训练时所有中文 noisy 被合并成一个验证域，
+event 的负改善可以被 HVAC/background 抵消。仅换 epoch 或增加训练轮数不能解决
+该问题。
+
+下一版定义为 `v6 denoise repair`，先改变数据与验证结构，不改变 GTCRN 网络：
+
+```text
+scene distribution:
+  identity       10%（正式训练仍由 scene-aware clean fraction 单独控制）
+  hvac           25%
+  far speech     20%（v5 为 30%，用户认为当前效果已经尚可）
+  event          25%（v5 为 15%）
+  noise no RIR   15%
+  noise only      5%
+
+SNR changes relative to v5:
+  far speech:    不变
+  HVAC:          -3 dB
+  background:    -4 dB
+  event:          6-18 dB（v5 为 12-24 dB）
+  event peak:     speech peak 的 1.2 倍上限（v5 为 0.8）
+```
+
+`make_classroom_v5_chinese_dataset.py` 已参数化 scene fraction 和各场景 SNR
+offset；默认值仍完全保持 v5 行为，只有显式提供 v6 参数时才生成更强噪声。
+
+v6 smoke 已生成到 `dataset_classroom_v6_denoise_smoke`：
+
+```text
+train/valid/test: 300/60/60（0.333/0.067/0.067 小时）
+train scenes: event 84, HVAC 68, far 56, background 51, identity 22,
+              noise-only 19
+background SNR: 4.08-21.43 dB，median 12.84
+event SNR:      6.28-17.58 dB，median 12.75
+speaker/room/noise/event split overlap: 全部 0
+audio format/length/nonfinite/peak audit: 通过
+```
+
+试听样本位于：
+
+```text
+dataset_classroom_v6_denoise_smoke/listening_samples/
+```
+
+每组 `_noisy.wav` 是模型未来输入，`_clean.wav` 是目标。此阶段重点判断噪声是否
+过强、是否仍能听清语音、event 是否符合教室桌椅/脚步/键盘/敲门的预期。用户
+确认 smoke 数据分布以前，不生成正式数据、不启动训练。

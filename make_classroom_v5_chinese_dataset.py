@@ -168,20 +168,20 @@ def build_native_speech(speaker_groups, samples, args, rng):
     return best
 
 
-def sample_scene_type(rng):
+def sample_scene_type(rng, scene_weights):
     roll = rng.random()
     cumulative = 0.0
-    for name, weight in SCENE_WEIGHTS:
+    for name, weight in scene_weights:
         cumulative += weight
         if roll < cumulative:
             return name
-    return SCENE_WEIGHTS[-1][0]
+    return scene_weights[-1][0]
 
 
-def sample_snr_db(args, rng):
+def sample_snr_db(args, rng, offset_db=0.0):
     if rng.random() < args.snr_main_fraction:
-        return rng.uniform(args.snr_main_min, args.snr_main_max)
-    return rng.uniform(args.snr_low_min, args.snr_low_max)
+        return rng.uniform(args.snr_main_min, args.snr_main_max) + offset_db
+    return rng.uniform(args.snr_low_min, args.snr_low_max) + offset_db
 
 
 def speech_level_dbfs(scene_type, args, rng):
@@ -319,7 +319,7 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
     manifest, rows = [], []
 
     for index in range(count):
-        scene_type = sample_scene_type(rng)
+        scene_type = sample_scene_type(rng, args.scene_weights)
         has_speech = scene_type != "noise_only"
 
         if has_speech:
@@ -355,7 +355,7 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
             noisy = speech_component.astype(np.float32)
             noise_source, noise_entry = pick_noise(background, BACKGROUND_SOURCE_WEIGHTS, rng)
             background_wav, noise_start = prepare_background(noise_entry, samples, args, rng)
-            background_snr = sample_snr_db(args, rng)
+            background_snr = sample_snr_db(args, rng, args.far_snr_offset_db)
             target_noise_rms = rms(noisy) / (10.0 ** (background_snr / 20.0))
             noisy = noisy + background_wav * (target_noise_rms / (rms(background_wav) + 1e-12))
         elif scene_type == "identity":
@@ -371,7 +371,12 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
                 weights = HVAC_SOURCE_WEIGHTS if scene_type == "hvac_noise" else BACKGROUND_SOURCE_WEIGHTS
                 noise_source, noise_entry = pick_noise(pools, weights, rng)
                 background_wav, noise_start = prepare_background(noise_entry, samples, args, rng)
-                background_snr = sample_snr_db(args, rng)
+                snr_offset = (
+                    args.hvac_snr_offset_db
+                    if scene_type == "hvac_noise"
+                    else args.background_snr_offset_db
+                )
+                background_snr = sample_snr_db(args, rng, snr_offset)
                 target_noise_rms = rms(noisy) / (10.0 ** (background_snr / 20.0))
                 noisy = noisy + background_wav * (target_noise_rms / (rms(background_wav) + 1e-12))
             elif scene_type == "noise_only":
@@ -471,6 +476,12 @@ def main():
     parser.add_argument("--num-train", type=int, default=8000)
     parser.add_argument("--num-valid", type=int, default=800)
     parser.add_argument("--num-test", type=int, default=800)
+    parser.add_argument("--identity-fraction", type=float, default=0.10)
+    parser.add_argument("--hvac-fraction", type=float, default=0.25)
+    parser.add_argument("--far-speech-fraction", type=float, default=0.30)
+    parser.add_argument("--event-fraction", type=float, default=0.15)
+    parser.add_argument("--noise-no-rir-fraction", type=float, default=0.15)
+    parser.add_argument("--noise-only-fraction", type=float, default=0.05)
     parser.add_argument("--fs", type=int, default=16000)
     parser.add_argument("--segment-seconds", type=float, default=4.0)
     parser.add_argument("--reference-dbfs", type=float, default=-25.0)
@@ -497,6 +508,9 @@ def main():
     parser.add_argument("--snr-main-max", type=float, default=22.0)
     parser.add_argument("--snr-low-min", type=float, default=8.0)
     parser.add_argument("--snr-low-max", type=float, default=12.0)
+    parser.add_argument("--far-snr-offset-db", type=float, default=0.0)
+    parser.add_argument("--hvac-snr-offset-db", type=float, default=0.0)
+    parser.add_argument("--background-snr-offset-db", type=float, default=0.0)
     parser.add_argument("--noise-only-dbfs-min", type=float, default=-38.0)
     parser.add_argument("--noise-only-dbfs-max", type=float, default=-28.0)
     parser.add_argument("--event-snr-min", type=float, default=12.0)
@@ -525,6 +539,19 @@ def main():
     parser.add_argument("--log-interval", type=int, default=200)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
+    args.scene_weights = [
+        ("identity", args.identity_fraction),
+        ("hvac_noise", args.hvac_fraction),
+        ("far_speech", args.far_speech_fraction),
+        ("event", args.event_fraction),
+        ("noise_no_rir", args.noise_no_rir_fraction),
+        ("noise_only", args.noise_only_fraction),
+    ]
+    if any(weight < 0.0 for _, weight in args.scene_weights):
+        raise ValueError("Scene fractions must be non-negative")
+    scene_weight_sum = sum(weight for _, weight in args.scene_weights)
+    if not math.isclose(scene_weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError(f"Scene fractions must sum to 1.0, got {scene_weight_sum}")
     args.min_gap_samples = int(round(args.gap_min_seconds * args.fs))
     args.max_gap_samples = int(round(args.gap_max_seconds * args.fs))
 
@@ -590,7 +617,7 @@ def main():
         writer.writerows(excluded)
 
     config = vars(args).copy()
-    config["scene_weights"] = SCENE_WEIGHTS
+    config["scene_weights"] = args.scene_weights
     config["rir_source_weights"] = RIR_SOURCE_WEIGHTS
     config["hvac_source_weights"] = HVAC_SOURCE_WEIGHTS
     config["background_source_weights"] = BACKGROUND_SOURCE_WEIGHTS
