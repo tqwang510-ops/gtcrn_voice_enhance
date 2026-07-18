@@ -2786,3 +2786,33 @@ dataset_classroom_v6_denoise_smoke_c/listening_far/
 ```
 
 本轮仍不生成正式数据、不训练模型；等待用户确认 far 强度。
+
+### 17.16 far 噪声源修正 smoke_d（2026-07-18）
+
+用户仍认为 smoke_c 的 `far_typical_noisy.wav` 几乎听不到噪声。检查发现该
+样本继续使用 OOFFICE；数值 SNR 不能完全反映频谱上的主观可闻度，弱办公室
+底噪即使放大仍可能听起来不明显。因此不再只降低 SNR，而是为 far 增加独立
+噪声源权重：
+
+```text
+MS-SNSD continuous: 70%
+OOFFICE:              0%
+ESC background:      30%
+
+far main SNR: 6-11 dB（75%）
+far low SNR:  4-6 dB（25%）
+```
+
+生成器默认 far source 权重仍与 v5 background 相同，只有显式设置参数才使用
+上述 v6 分布；权重必须非负且总和为 1。
+
+`dataset_classroom_v6_denoise_smoke_d` 已生成 300/60/60 并通过全部审计。
+试听文件：
+
+```text
+far_typical: MS-SNSD AirConditioner，SNR 10.43 dB
+far_low:     ESC rain，SNR 5.57 dB
+dataset_classroom_v6_denoise_smoke_d/listening_far/
+```
+
+用户确认这两类 far 输入后才锁定正式数据配置。

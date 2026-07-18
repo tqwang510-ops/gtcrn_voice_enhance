@@ -366,7 +366,9 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
             )
             wet_mix = wet_mix_value
             noisy = speech_component.astype(np.float32)
-            noise_source, noise_entry = pick_noise(background, BACKGROUND_SOURCE_WEIGHTS, rng)
+            noise_source, noise_entry = pick_noise(
+                background, args.far_background_source_weights, rng
+            )
             background_wav, noise_start = prepare_background(noise_entry, samples, args, rng)
             background_snr = sample_scene_snr_db(scene_type, args, rng)
             target_noise_rms = rms(noisy) / (10.0 ** (background_snr / 20.0))
@@ -524,6 +526,9 @@ def main():
     parser.add_argument("--far-snr-main-max", type=float, default=None)
     parser.add_argument("--far-snr-low-min", type=float, default=None)
     parser.add_argument("--far-snr-low-max", type=float, default=None)
+    parser.add_argument("--far-ms-continuous-weight", type=float, default=0.45)
+    parser.add_argument("--far-ooffice-weight", type=float, default=0.35)
+    parser.add_argument("--far-esc-background-weight", type=float, default=0.20)
     parser.add_argument("--noise-only-dbfs-min", type=float, default=-38.0)
     parser.add_argument("--noise-only-dbfs-max", type=float, default=-28.0)
     parser.add_argument("--event-snr-min", type=float, default=12.0)
@@ -560,8 +565,20 @@ def main():
         ("noise_no_rir", args.noise_no_rir_fraction),
         ("noise_only", args.noise_only_fraction),
     ]
+    args.far_background_source_weights = {
+        "ms_continuous": args.far_ms_continuous_weight,
+        "ooffice": args.far_ooffice_weight,
+        "esc_background": args.far_esc_background_weight,
+    }
     if any(weight < 0.0 for _, weight in args.scene_weights):
         raise ValueError("Scene fractions must be non-negative")
+    if any(weight < 0.0 for weight in args.far_background_source_weights.values()):
+        raise ValueError("Far background source weights must be non-negative")
+    far_source_weight_sum = sum(args.far_background_source_weights.values())
+    if not math.isclose(far_source_weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError(
+            f"Far background source weights must sum to 1.0, got {far_source_weight_sum}"
+        )
     scene_weight_sum = sum(weight for _, weight in args.scene_weights)
     if not math.isclose(scene_weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-6):
         raise ValueError(f"Scene fractions must sum to 1.0, got {scene_weight_sum}")
@@ -650,6 +667,7 @@ def main():
     config["rir_source_weights"] = RIR_SOURCE_WEIGHTS
     config["hvac_source_weights"] = HVAC_SOURCE_WEIGHTS
     config["background_source_weights"] = BACKGROUND_SOURCE_WEIGHTS
+    config["far_background_source_weights"] = args.far_background_source_weights
     config["event_source_weights"] = EVENT_SOURCE_WEIGHTS
     config["ms_ac_categories"] = sorted(MS_AC_CATEGORIES)
     config["ms_continuous_categories"] = sorted(MS_CONTINUOUS_CATEGORIES)
