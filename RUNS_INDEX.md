@@ -42,3 +42,11 @@ New baseline evaluations made after the validation-accounting repair should incl
 - AISHELL normalized clean comparison: `runs/v5_epoch5_eval/aishell_clean_norm_compare/`
 - Epoch 3 clean listening: `runs/v5_epoch5_eval/aishell_clean_norm_compare/listening_epoch3/`
 - Epoch 5 clean listening: `runs/v5_epoch5_eval/aishell_clean_norm_compare/listening_epoch5/`
+
+## v6 denoise evaluation
+
+- Training run: `runs/classroom_v6_denoise/`
+- Selected candidate: `runs/classroom_v6_denoise/checkpoints/candidate_epoch_009.tar`
+- Full evaluation: `runs/v6_eval/`
+- v5 comparison listening: `runs/v6_eval/listening_v5_baseline/`
+- v6 epoch 9 listening: `runs/v6_eval/listening_epoch9/`

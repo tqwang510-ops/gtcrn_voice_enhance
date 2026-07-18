@@ -2877,3 +2877,73 @@ D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custo
 
 已用同一命令将 `--epochs 12` 临时改为 `--epochs 0` 做只加载检查：CUDA、
 STFT、所有数据路径、八域验证、replay 和 init checkpoint 均正常，未执行训练。
+
+### 17.18 v6 训练结果、epoch 9 候选与完整回归（2026-07-18）
+
+用户在本机终端完成 12 epoch，约 71 分钟。训练 loss 从 0.317 降到 -0.100，
+event valid SI-SNR change 从 epoch 1 的 +0.426 提升到后期约 +1.2~+1.38 dB。
+
+本轮**没有 `best.tar`**。八域硬门槛从未在同一 epoch 全部通过：epoch 1 仅
+normalized clean PESQ 以 0.0014 的差距失败；epoch 3-9 主要是 v4_nonclean
+在 SI-SNR/STOI 门槛附近或略低；epoch 10-12 又出现 clean P10 左尾下降。
+`best_selection_candidate.tar` 是 epoch 12，仅代表 selection 数值最低，不代表
+通过硬门槛，不推荐直接使用。
+
+综合 valid 的 event、v4 和 clean P10，先选 epoch 7/9 做未见 v6 test 对照。
+epoch 9 在 1200 条 v6 test 上全面优于 epoch 7，因此复制为：
+
+```text
+runs/classroom_v6_denoise/checkpoints/candidate_epoch_009.tar
+```
+
+复制后 SHA256 与 `epoch_009.tar` 一致。v6 test 总体：
+
+| metric | v5 baseline | v6 epoch 9 |
+|---|---:|---:|
+| SI-SNR change | +0.395 | +1.011 |
+| PESQ change | +0.148 | +0.321 |
+| STOI change | +0.0021 | +0.0200 |
+| improved fraction | 79.10% | 83.30% |
+| noise-only attenuation | 14.40 dB | 18.85 dB |
+| identity SI-SNR | 80.16 dB | 81.14 dB |
+
+逐场景 v5 -> v6 epoch 9：
+
+| scene | SI-SNR change | PESQ change | STOI change |
+|---|---:|---:|---:|
+| far | +0.447 -> +1.260 | +0.140 -> +0.240 | +0.0007 -> +0.0302 |
+| HVAC | +0.210 -> +0.520 | +0.188 -> +0.236 | +0.0065 -> +0.0083 |
+| background | +1.097 -> +1.769 | +0.240 -> +0.353 | +0.0057 -> +0.0154 |
+| event | +0.105 -> +0.845 | +0.056 -> +0.452 | -0.0037 -> +0.0266 |
+
+用户指出的 event 弱抑制在合成 test 上得到明确修复。identity normalized P10
+从 v5 的 21.20 提高到 27.05 dB，但两者仍各有 5 条 <20 dB，v6 最差样本
+约 3.2 dB，仍是必须人工试听的左尾。
+
+完整回归：
+
+| test | SI-SNR+ | PESQ+ | STOI+ | clean SI-SNR |
+|---|---:|---:|---:|---:|
+| v6 test | +1.011 | +0.321 | +0.0200 | 81.14 |
+| v4 test | +0.248 | +0.206 | +0.0047 | 87.57 |
+| v2 test | +0.569 | +0.228 | +0.0189 | 83.05 |
+| VoiceBank | +7.173 | +0.516 | -0.00036 | - |
+
+相对 v5，目标 v6 与 VoiceBank 的 SI-SNR/PESQ 明显增强；旧 v4/v2 有回归，
+VoiceBank STOI 轻微转负。AISHELL raw 仍接近透明（SI-SNR 97.90、PESQ 4.638、
+STOI 0.99982）；normalized clean 平均 SI-SNR 69.12、PESQ 4.561、STOI 0.99531，
+比 v5 更积极地压低低能量段，需试听判断是否可接受。
+
+试听矩阵使用同一 13 组 noisy/clean，分别由 v5 和 v6 epoch 9 增强：
+
+```text
+runs/v6_eval/listening_v5_baseline/
+runs/v6_eval/listening_epoch9/
+```
+
+重点听 `event_*`、`hvac_typical_failure`、`background_typical_residual`，以及
+`identity_*_worst`。用户试听确认以前不继续训练。
+
+方法边界：epoch 7/9 已使用 v6 test 做事后候选比较，因此该 test 不再是最终
+无偏 holdout。若用户接受 epoch 9 听感，下一步冻结模型，不再调参；用新 seed
+生成一套 confirmation 混合做一次最终确认，再决定是否提升为部署候选。
