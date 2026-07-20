@@ -3468,3 +3468,58 @@ D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custo
 
 训练后只比较 01/04/07 对应类型与 03/06/09/11 保护样本；若 04/07 人声仍损伤，
 停止在当前 GTCRN/loss 上继续微调，进入更强模型或成熟持续噪声前端对照。
+
+### 17.29 v7.2 repair smoke 训练结果与试听矩阵（2026-07-20）
+
+注意：17.28 的 smoke 训练命令实际未被执行（`runs/classroom_v7_2_smoke` 只有
+epochs=0 加载检查的 config.json，无 checkpoint）。本轮由助手补跑同一命令，
+3 epoch 约 35 分钟，best.tar = epoch 2（selection -3.4354），全部八个域在
+每个 epoch 均通过门槛。
+
+与初始化（v7.1 best）在同一 smoke 验证域上的对照（base -> epoch 2）：
+
+| domain | SI-SNR change | PESQ change | clean SI-SNR dB |
+|---|---:|---:|---:|
+| near_low (n=2) | +2.62 -> +2.66 | +0.125 -> +0.130 | — |
+| near_main | +4.16 -> +4.09 | +0.403 -> +0.386 | — |
+| near_high | +0.64 -> +0.71 | +0.374 -> +0.357 | — |
+| far_preserved | +3.98 -> +3.93 | +0.223 -> +0.231 | — |
+| murmur | +4.47 -> +4.41 | +0.280 -> +0.280 | — |
+| voicebank | +5.44 -> +5.35 | +0.391 -> +0.383 | — |
+| zh_clean_raw | — | -0.0119 -> -0.0053 | 97.27 -> 106.46 |
+| zh_clean_norm | — | -0.0629 -> -0.0472 | 86.36 -> 92.96 |
+
+3 epoch / lr 5e-6 只带来很小移动：noisy 域基本持平（±0.1 dB 内），但 clean
+透明度明显上升（raw +9.2 dB、norm +6.6 dB，clean PESQ 损失约减半），与
+speech-underestimate 惩罚的设计方向一致。far_preserved SI-SNR 微降是预期内
+的口径变化（target 不再强制去混响），不能与 v7.1 直接比数值。
+
+13 个试听文件（v7.1 test，同一批 noisy）两模型指标对照：
+
+| tag | v7.1 SI-SNR+ | v7.2 SI-SNR+ | v7.1 PESQ+ | v7.2 PESQ+ |
+|---|---:|---:|---:|---:|
+| 01 hvac_low | +8.11 | +7.81 | +0.200 | +0.184 |
+| 04 machine_low | +2.20 | +2.40 | +0.084 | +0.066 |
+| 07 far_low | +4.79 | +4.72 | +0.284 | +0.291 |
+| 11 identity | -86.45 | -48.96 | -0.009 | 0.000 |
+| 12 near_high_worst | -7.24 | -6.66 | +0.097 | +0.117 |
+| 13 overall_worst | -7.88 | -7.52 | +0.132 | +0.151 |
+
+（02/03/05/06/08/09/10 均小幅变化，详见 `runs/v7_2_eval/listening13_metrics/`。）
+identity 样本的 clean 抑制明显减轻（等效透传约 58 -> 96 dB），12/13 左尾也略
+收窄；01 残余噪声指标略降（降噪稍保守）。03/06/09 保护样本保持正改善。
+
+试听矩阵（A/B/C 同文件同名）：
+
+```text
+runs/v7_1_eval/listening/01_v5/
+runs/v7_1_eval/listening/02_v7_1_best/
+runs/v7_1_eval/listening/03_v7_2_smoke/
+```
+
+按 17.28 决策框架，只听 01/04/07（低 SNR 失败样本）与 03/06/09/11（保护样
+本），重点回答两个问题：04/07 的人声损伤是否消失或减轻到可接受；01/04/07
+的残余噪声是否比 02_v7_1_best 更干净或可接受。若 04/07 人声仍损伤，停止在
+当前 GTCRN/loss 上继续微调，转入更强模型或成熟持续噪声前端对照；若通过，
+再以 v7.2 两个开关（far-preserve-rir、speech-underestimate-weight）生成正式
+数据并训练。
