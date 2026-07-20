@@ -1,0 +1,88 @@
+{
+  "domains": [
+    {
+      "name": "v7_1_near_denoise",
+      "noisy": "..\\dataset_classroom_v7_1\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_1\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_1\\generated\\metadata\\valid.csv",
+      "include_scene_types": ["hvac_noise", "noise_no_rir"],
+      "require_empty_fields": ["student_murmur_file"],
+      "numeric_filters": {"background_snr_db": {"max": 8.0}},
+      "max_files": 128,
+      "sample_seed": 2026072601,
+      "weight": 1.25,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 1.20, "min_pesq_change": 0.10, "min_stoi_change": 0.005}
+    },
+    {
+      "name": "v7_1_near_high",
+      "noisy": "..\\dataset_classroom_v7_1\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_1\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_1\\generated\\metadata\\valid.csv",
+      "include_scene_types": ["hvac_noise", "noise_no_rir"],
+      "require_empty_fields": ["student_murmur_file"],
+      "numeric_filters": {"background_snr_db": {"min": 8.0}},
+      "max_files": 64,
+      "sample_seed": 2026072602,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": -0.20, "min_pesq_change": 0.05, "min_stoi_change": -0.005}
+    },
+    {
+      "name": "v7_1_murmur",
+      "noisy": "..\\dataset_classroom_v7_1\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_1\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_1\\generated\\metadata\\valid.csv",
+      "exclude_scene_types": ["identity", "noise_only"],
+      "require_nonempty_fields": ["student_murmur_file"],
+      "max_files": 128,
+      "sample_seed": 2026072603,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 0.80, "min_pesq_change": 0.08, "min_stoi_change": 0.005}
+    },
+    {
+      "name": "v7_1_far",
+      "noisy": "..\\dataset_classroom_v7_1\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_1\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_1\\generated\\metadata\\valid.csv",
+      "include_scene_types": ["far_speech"],
+      "max_files": 128,
+      "sample_seed": 2026072604,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 0.0, "min_pesq_change": 0.05, "min_stoi_change": -0.002}
+    },
+    {
+      "name": "zh_clean_raw",
+      "noisy": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\raw\\noisy",
+      "clean": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\raw\\clean",
+      "identity": true,
+      "max_files": 64,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_db", "direction": "max", "scale": 20.0},
+      "gate": {"min_si_snr_db": 60.0, "min_si_snr_p10_db": 30.0, "min_pesq_change": -0.05, "min_stoi_change": -0.002}
+    },
+    {
+      "name": "zh_clean_norm",
+      "noisy": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\normalized\\noisy",
+      "clean": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\normalized\\clean",
+      "identity": true,
+      "max_files": 64,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_db", "direction": "max", "scale": 20.0},
+      "gate": {"min_si_snr_db": 55.0, "min_si_snr_p10_db": 20.0, "min_pesq_change": -0.10, "min_stoi_change": -0.005}
+    },
+    {
+      "name": "voicebank",
+      "noisy": "..\\dataset_voicebank_replay_v4\\generated\\valid\\noisy",
+      "clean": "..\\dataset_voicebank_replay_v4\\generated\\valid\\clean",
+      "manifest": "..\\dataset_voicebank_replay_v4\\generated\\metadata\\valid.json",
+      "max_files": 128,
+      "sample_seed": 2026072204,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 3.0},
+      "gate": {"min_si_snr_change": 3.0, "min_pesq_change": 0.25, "min_stoi_change": 0.0}
+    }
+  ]
+}

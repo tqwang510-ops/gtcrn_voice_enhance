@@ -60,3 +60,11 @@ New baseline evaluations made after the validation-accounting repair should incl
 - Listening manifest: `runs/v7_eval/listening_manifest.json`
 - v5 listening output: `runs/v7_eval/listening/01_v5/`
 - v7 listening output: `runs/v7_eval/listening/02_v7_best/`
+
+## v7.1 stronger-noise evaluation
+
+- Training run: `runs/classroom_v7_1/`
+- Selected checkpoint: `runs/classroom_v7_1/checkpoints/best.tar` (epoch 12)
+- v7.1 test evaluation: `runs/v7_1_eval/v7_1_test/`
+- v5 baseline on the same test: `runs/v7_1_eval/v5_on_v7_1_test/`
+- v4 regression: `runs/v7_1_eval/v4_test/` (pending at documentation time)

@@ -3235,3 +3235,152 @@ D:\modeltraining\dataset_classroom_v7_1_smoke\listening_samples
 01-03 为 HVAC low/main/high，04-06 为机器 low/main/high，07-09 为 far
 low/main/high，10 为讨论声，11 为 identity。当前只确认数据强度；用户确认以前
 不生成正式 v7.1、不启动任何训练。
+
+### 17.24 用户反馈：三档整体下移，smoke_b（2026-07-18）
+
+用户试听 v7.1 smoke 全部 11 组后反馈：**所有文件都不吵，只有 01/04/07
+（即 low 档）才是其认为正常的教室噪声**。对应实测 SNR：01 hvac 6.54 dB、
+04 machine 6.21 dB、07 far 5.13 dB。结论：原 main 档（near 8-15 dB）就已经
+偏干净，三档需整体下移，让"用户认定的正常强度"成为 main 档。
+
+新三档分布（生成器参数不变、仅数值下移，seed 与 v7.1 smoke 相同，因此底层
+语音/房间/噪声文件与上一轮一致，只有噪声缩放不同，可直接 A/B）：
+
+```text
+near low:  20%, 1-4 dB     （原 4-8）
+near main: 60%, 4-8 dB     （原 8-15，= 用户认定的正常档）
+near high: 20%, 8-14 dB    （原 15-24；保留安静教室 do-no-harm 保护）
+
+far low:   25%, 2-4 dB     （原 4-6）
+far main: 60%, 4-6 dB      （原 6-11）
+far high: 15%, 6-10 dB     （原 11-18）
+```
+
+high 档不再追求"更干净的上限"，只保留到原 main 档下沿附近，原因是 17.23 的
+左尾教训：高输入 SNR 样本仍需要训练覆盖，否则模型在安静场景容易过度抑制。
+
+smoke_b 已生成并通过全部审计：
+
+```text
+base:     dataset_classroom_v7_1_continuous_smoke_b/generated
+layered:  dataset_classroom_v7_1_smoke_b/generated（400/80/80）
+murmur:   146 条（PCAFETER 82，PRESTO 64），参数与 v7.1 smoke 相同
+train low/main/high: hvac 37/78/27, machine 21/48/20, far 22/58/21
+background SNR: near 1.1-13.7 dB（median 5.9），far 2.1-9.7 dB（median 5.1）
+speaker/room/noise/event split overlap: 0
+1120 WAV format/length/nonfinite/peak/silence audit: pass
+```
+
+试听目录（结构与上轮相同，01-11；多数样本底层内容与上轮同文件、仅噪声更
+响，便于直接对比）：
+
+```text
+D:\modeltraining\dataset_classroom_v7_1_smoke_b\listening_samples
+```
+
+01 hvac 2.9 dB / 02 hvac 6.4 / 03 hvac 10.4 / 04 machine 2.7 / 05 machine
+6.7 / 06 machine 10.7 / 07 far 3.1 / 08 far 5.0 / 09 far 6.7 / 10 murmur
+（far 底噪 6.0 dB + PRESTO 17.0 dB）/ 11 identity。用户确认强度以前不生成
+正式数据、不训练。若 main 档（02/05/08）被认可，正式 v7.1 即按此分布生成；
+注意 01/04/07 现在比上轮更响一档，需确认 low 档没有强到掩盖语音。
+
+### 17.25 v7.1 正式数据、SNR 分档验证域与训练命令（2026-07-18）
+
+用户确认 smoke_b 全部 11 组"比较符合"。按完全相同的三档分布生成正式数据：
+
+```text
+base:    dataset_classroom_v7_1_continuous/generated（seed/split_seed 20260725）
+layered: dataset_classroom_v7_1/generated（murmur seed 20260726）
+train/valid/test: 8000/800/800（8.89/0.89/0.89 小时）
+scene (train): hvac 3029, far 2018, machine 1838, identity 954, noise-only 161
+murmur: 2455 条（PCAFETER 1233，PRESTO 1222），30% 非 identity/noise-only
+near SNR low/main/high: hvac 626/1822/581, machine 354/1119/365（1.0-14.0，median ~6）
+far SNR low/main/high:  477/1209/332（2.0-10.0，median 4.9）
+speaker/room/noise/event split overlap: 0
+19200 WAV audit（2000 抽样）: pass
+```
+
+验证域 `validation_domains_v7_1.json` 共七域，首次使用 `numeric_filters` 按
+SNR 分档，把"必须降噪"和"不许伤人声"拆开考核：
+
+```text
+v7_1_near_denoise: hvac+machine、无 murmur、SNR<=8 dB，128 条，weight 1.25
+v7_1_near_high:    hvac+machine、无 murmur、SNR>8 dB，64 条（do-no-harm）
+v7_1_murmur:       有 murmur 层的非 identity 场景，128 条
+v7_1_far:          far_speech 全部，128 条
+zh_clean_raw / zh_clean_norm / voicebank: 与 v7 相同（含原门槛）
+```
+
+v5 epoch 3 在该验证域上的基线（`runs/classroom_v5_chinese/v7_1domains_baseline.json`）
+与据此锚定的门槛（保护线风格同 v7：init 可过、selection 驱动提升）：
+
+| domain | SI-SNR+ | PESQ+ | STOI+ | gate (si/pesq/stoi) |
+|---|---:|---:|---:|---|
+| near_denoise | +1.687 | +0.153 | +0.0260 | +1.20 / +0.10 / +0.005 |
+| near_high | +0.966 | +0.260 | +0.0197 | -0.20 / +0.05 / -0.005 |
+| murmur | +1.345 | +0.146 | +0.0195 | +0.80 / +0.08 / +0.005 |
+| far | +0.378 | +0.093 | +0.0023 | 0.0 / +0.05 / -0.002 |
+| zh_clean_raw | 94.95 dB | -0.015 | -0.0002 | 同 v7（60 dB / P10 30 dB） |
+| zh_clean_norm | 82.04 dB | -0.062 | -0.0025 | 同 v7（55 dB / P10 20 dB） |
+| voicebank | +4.881 | +0.412 | +0.0150 | 同 v7（+3.0 / +0.25 / 0.0） |
+
+near_high 是唯一允许 SI-SNR 略负的域，专门盯住 17.23 左尾问题：训练变激进
+后不能在安静样本上伤人声。
+
+**不从头训练**：从 v5 epoch 3 加载权重、新建 optimizer（v7 血缘实验结论不变，
+不使用 v6/v7 checkpoint）。lr 2e-5、20 epoch、patience 5、frozen BN、25%
+VoiceBank replay、clean-fraction 0.12（identity）。epochs=0 加载检查已通过
+（CUDA/STFT/全部数据路径/七域/replay/init）。
+
+在 Windows CMD 的 `(work) D:\modeltraining\gtcrn>` 中粘贴下面完整一行：
+
+```cmd
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py --train-noisy ..\dataset_classroom_v7_1\generated\train\noisy --train-clean ..\dataset_classroom_v7_1\generated\train\clean --valid-noisy ..\dataset_classroom_v7_1\generated\valid\noisy --valid-clean ..\dataset_classroom_v7_1\generated\valid\clean --train-metadata-csv ..\dataset_classroom_v7_1\generated\metadata\train.csv --valid-metadata-csv ..\dataset_classroom_v7_1\generated\metadata\valid.csv --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json --replay-fraction 0.25 --clean-fraction 0.12 --clean-scene-type identity --epoch-size 12000 --validation-domains validation_domains_v7_1.json --out-dir runs\classroom_v7_1 --segment-seconds 4 --epochs 20 --batch-size 8 --lr 2e-5 --scheduler none --num-workers 4 --identity-loss-weight 0.1 --freeze-batchnorm --save-every-epoch --early-stopping-patience 5 --init-checkpoint runs\classroom_v5_chinese\checkpoints\best.tar --seed 20260727 --overwrite-run
+```
+
+训练完成后下一步：best.tar 的 v7.1 test 对照（vs v5）、v4/v2/VoiceBank 回归、
+AISHELL clean 透传、分档试听矩阵（重点 near_high 是否伤人声、near_denoise
+降噪是否可闻）。
+
+### 17.26 v7.1 正式训练结果与 test 评估（2026-07-20）
+
+用户完成 v7.1 正式训练。训练在 epoch 17 因连续 5 个 epoch 没有改善而提前停止，
+总耗时约 148.4 分钟。综合选择最优为 epoch 12：
+
+```text
+runs/classroom_v7_1/checkpoints/best.tar
+checkpoint epoch: 12
+selection loss: -3.01620983
+```
+
+epoch 12 后 near denoise、near high、murmur、far 仍有小幅变化，但综合 selection
+loss 没有更好；正式评估使用 epoch 12 的 `best.tar`，不使用 `last.tar`。
+
+在未用于选择 checkpoint 的 v7.1 test 800 条样本上，与同一 test 的 v5 epoch 3：
+
+| metric | v5 | v7.1 best |
+|---|---:|---:|
+| SI-SNR change | +1.676 dB | +2.994 dB |
+| PESQ change | +0.201 | +0.368 |
+| STOI change | +0.0215 | +0.0577 |
+| improved fraction | 85.23% | 94.88% |
+| noise-only attenuation | 20.75 dB | 24.34 dB |
+| clean enhanced SI-SNR | 80.33 dB | 84.88 dB |
+| clean PESQ change | -0.0835 | -0.0630 |
+| clean STOI change | -0.00269 | -0.00181 |
+
+v7.1 在更符合用户听感的噪声强度上，比 v5 明显更积极；同时 clean PESQ/STOI
+退化减轻，说明本轮没有简单用“更强降噪换人声损伤”。分场景 test：
+
+| scene | files | SI-SNR change | PESQ change | STOI change |
+|---|---:|---:|---:|---:|
+| HVAC | 297 | +3.624 | +0.420 | +0.0576 |
+| machine/no-RIR | 198 | +2.934 | +0.398 | +0.0574 |
+| far speech | 189 | +2.065 | +0.254 | +0.0580 |
+| continuous without murmur | 480 | +2.905 | +0.376 | +0.0566 |
+| student murmur | 204 | +3.201 | +0.348 | +0.0601 |
+
+当前已完成：v7.1 test、v5 对照、训练验证域和基本分场景统计。`v4_test` 回归
+进程仍在运行，当前 `metrics.csv` 为空，不能据此下结论；VoiceBank 验证域在训练
+过程中保持通过（epoch 12 SI-SNR change +6.27 dB）。待回归完成后再决定是否提升
+为部署候选。
