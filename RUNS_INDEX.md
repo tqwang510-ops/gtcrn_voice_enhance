@@ -73,3 +73,10 @@ New baseline evaluations made after the validation-accounting repair should incl
 - v7.1 listening manifest: `runs/v7_1_eval/listening_manifest.json`
 - v5 listening output: `runs/v7_1_eval/listening/01_v5/`
 - v7.1 listening output: `runs/v7_1_eval/listening/02_v7_1_best/`
+
+## v7.2 low-SNR speech-preservation smoke
+
+- Smoke dataset: `../dataset_classroom_v7_2_smoke/generated/`
+- Validation config: `validation_domains_v7_2_smoke.json`
+- v7.1 initialization baseline: `runs/v7_2_eval/provenance/v7_2_smoke_baseline.json`
+- Training output after user runs it: `runs/classroom_v7_2_smoke/`

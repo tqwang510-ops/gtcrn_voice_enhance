@@ -3418,3 +3418,53 @@ runs/v7_1_eval/listening/02_v7_1_best/
 `_noisy.wav -> _enhanced.wav -> _clean.wav` 顺序听，重点比较 v5 与 v7.1 的
 `_enhanced.wav`。v7.1 在指标上胜出，但是否最终采用仍以这些分档试听和 v4/v2
 完整回归为准。
+
+### 17.28 v7.1 分档试听结论与 v7.2 repair smoke（2026-07-20）
+
+用户试听 v5/v7.1 同文件 A/B 后确认：03/06/09 high-SNR 和 11 identity 没有
+人声损失；04 machine-low、07 far-low 有人声损失；01/04/07 low-SNR 的残余
+噪声都不够干净。
+
+三个失败样本虽然客观指标均改善，但不能推翻听感：
+
+| sample | input SI-SNR | v7.1 SI-SNR change | PESQ change | STOI change |
+|---|---:|---:|---:|---:|
+| 01 HVAC low | 4.08 | +8.11 | +0.200 | +0.0377 |
+| 04 machine low | 3.98 | +2.20 | +0.084 | +0.0310 |
+| 07 far low | 2.43 | +4.79 | +0.284 | +0.1022 |
+
+因此 v7.1 是当前最佳候选，但仍未达到部署听感；不能继续仅靠增加训练轮数或
+降低 SNR。v7.2 只验证两个假设：低 SNR far 不再同时强制去混响，以及对预测
+语音幅度低于 clean 的频点增加非对称惩罚。
+
+实现保持向后兼容：
+
+```text
+--far-preserve-rir-max-snr 6
+  far 且 background SNR <= 6 dB 时，target_mode=rir_preserved；
+  target 为无新增噪声但保留该 RIR 的 speech component。
+
+--speech-underestimate-weight 1.0
+  compressed magnitude 低于 clean 时使用 2 倍权重；默认 0 时与旧 HybridLoss
+  数值完全一致。
+```
+
+v7.2 smoke 位于 `dataset_classroom_v7_2_smoke/generated`，400/80/80，沿用已
+确认的 v7.1 噪声分布。审计通过；train 104 个 far 中 94 个为
+`rir_preserved`、10 个 high-SNR far 保持 `native_room`；speaker/room/noise
+跨 split overlap 为 0，1120 WAV 抽查全部通过。
+
+验证配置 `validation_domains_v7_2_smoke.json` 分为 near low/main/high、
+far-preserved、murmur、clean raw/norm 和 VoiceBank。v7.1 best 初始化基线已保存
+到 `runs/v7_2_eval/provenance/v7_2_smoke_baseline.json`。其中 valid near-low
+只有 2 条，因此本轮只能做方向性 smoke，不能把绝对数值当正式结论。
+
+训练管线已用 `epochs=0` 检查通过，没有执行训练。用户在 Windows CMD 手动运行
+3 epoch repair smoke：
+
+```cmd
+D:\Anaconda\Scripts\conda.exe run --no-capture-output -n work python train_custom.py --train-noisy ..\dataset_classroom_v7_2_smoke\generated\train\noisy --train-clean ..\dataset_classroom_v7_2_smoke\generated\train\clean --valid-noisy ..\dataset_classroom_v7_2_smoke\generated\valid\noisy --valid-clean ..\dataset_classroom_v7_2_smoke\generated\valid\clean --train-metadata-csv ..\dataset_classroom_v7_2_smoke\generated\metadata\train.csv --valid-metadata-csv ..\dataset_classroom_v7_2_smoke\generated\metadata\valid.csv --replay-train-noisy ..\dataset_voicebank_replay_v4\generated\train\noisy --replay-train-clean ..\dataset_voicebank_replay_v4\generated\train\clean --replay-train-manifest ..\dataset_voicebank_replay_v4\generated\metadata\train.json --replay-valid-noisy ..\dataset_voicebank_replay_v4\generated\valid\noisy --replay-valid-clean ..\dataset_voicebank_replay_v4\generated\valid\clean --replay-valid-manifest ..\dataset_voicebank_replay_v4\generated\metadata\valid.json --replay-fraction 0.25 --clean-fraction 0.15 --clean-scene-type identity --epoch-size 2000 --validation-domains validation_domains_v7_2_smoke.json --out-dir runs\classroom_v7_2_smoke --segment-seconds 4 --epochs 3 --batch-size 8 --lr 5e-6 --scheduler none --num-workers 4 --identity-loss-weight 0.1 --speech-underestimate-weight 1.0 --freeze-batchnorm --save-every-epoch --init-checkpoint runs\classroom_v7_1\checkpoints\best.tar --seed 20260730 --overwrite-run
+```
+
+训练后只比较 01/04/07 对应类型与 03/06/09/11 保护样本；若 04/07 人声仍损伤，
+停止在当前 GTCRN/loss 上继续微调，进入更强模型或成熟持续噪声前端对照。

@@ -839,6 +839,7 @@ def main():
     parser.add_argument("--identity-energy-min-db", type=float, default=-50.0)
     parser.add_argument("--identity-energy-max-db", type=float, default=-20.0)
     parser.add_argument("--identity-gain-clamp-db", type=float, default=20.0)
+    parser.add_argument("--speech-underestimate-weight", type=float, default=0.0)
     parser.add_argument("--primary-valid-weight", type=float, default=0.60)
     parser.add_argument("--replay-valid-weight", type=float, default=0.25)
     parser.add_argument("--clean-valid-weight", type=float, default=0.15)
@@ -864,6 +865,8 @@ def main():
     args = parser.parse_args()
 
     seed_everything(args.seed)
+    if args.speech_underestimate_weight < 0.0:
+        raise ValueError("--speech-underestimate-weight must be non-negative")
     if args.resume and args.init_checkpoint:
         raise ValueError("Use either --resume or --init-checkpoint, not both.")
     replay_train_paths = [args.replay_train_noisy, args.replay_train_clean]
@@ -1087,7 +1090,11 @@ def main():
 
     model = GTCRN(nfft=args.n_fft, fs=args.fs).to(device)
     loss_fn = HybridLoss(
-        args.n_fft, args.hop_length, args.win_length, center=args.center
+        args.n_fft,
+        args.hop_length,
+        args.win_length,
+        center=args.center,
+        speech_underestimate_weight=args.speech_underestimate_weight,
     ).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay

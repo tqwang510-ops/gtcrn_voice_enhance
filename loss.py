@@ -5,12 +5,20 @@ from audio_utils import stft_to_wav
 
 
 class HybridLoss(nn.Module):
-    def __init__(self, n_fft=512, hop_length=256, win_length=512, center=True):
+    def __init__(
+        self,
+        n_fft=512,
+        hop_length=256,
+        win_length=512,
+        center=True,
+        speech_underestimate_weight=0.0,
+    ):
         super().__init__()
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
         self.center = center
+        self.speech_underestimate_weight = speech_underestimate_weight
 
     def forward(self, pred_stft, true_stft):
         pred_stft_real, pred_stft_imag = pred_stft[:,:,:,0], pred_stft[:,:,:,1]
@@ -23,7 +31,11 @@ class HybridLoss(nn.Module):
         true_imag_c = true_stft_imag / (true_mag**(0.7))
         real_loss = nn.MSELoss()(pred_real_c, true_real_c)
         imag_loss = nn.MSELoss()(pred_imag_c, true_imag_c)
-        mag_loss = nn.MSELoss()(pred_mag**(0.3), true_mag**(0.3))
+        mag_error = pred_mag**(0.3) - true_mag**(0.3)
+        mag_weights = 1.0 + self.speech_underestimate_weight * (mag_error < 0).to(
+            mag_error.dtype
+        )
+        mag_loss = torch.mean(mag_weights * mag_error.square())
         
         y_pred = stft_to_wav(
             pred_stft,

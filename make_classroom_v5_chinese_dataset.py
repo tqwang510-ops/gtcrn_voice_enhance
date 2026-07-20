@@ -346,6 +346,7 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
     for index in range(count):
         scene_type = sample_scene_type(rng, args.scene_weights)
         has_speech = scene_type != "noise_only"
+        target_mode = "native_room"
 
         if has_speech:
             native, used_clean, activity, speaker, native_dbfs = build_native_speech(
@@ -385,6 +386,12 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
             background_snr = sample_scene_snr_db(scene_type, args, rng)
             target_noise_rms = rms(noisy) / (10.0 ** (background_snr / 20.0))
             noisy = noisy + background_wav * (target_noise_rms / (rms(background_wav) + 1e-12))
+            if (
+                args.far_preserve_rir_max_snr is not None
+                and background_snr <= args.far_preserve_rir_max_snr
+            ):
+                target = speech_component.astype(np.float32).copy()
+                target_mode = "rir_preserved"
         elif scene_type == "identity":
             noisy = target.copy()
             noise_source, noise_entry, noise_start = "", None, 0
@@ -442,7 +449,7 @@ def generate_split(split, count, speaker_groups, rir_pools, hvac, background, ev
                 "file": name,
                 "split": split,
                 "scene_type": scene_type,
-                "target_mode": "native_room",
+                "target_mode": target_mode,
                 "clean_files": "|".join(relative_path(path, args.dataset_root) for path, _, _ in used_clean),
                 "clean_spans": "|".join(f"{start}:{length}" for _, start, length in used_clean),
                 "speaker_id": speaker,
@@ -550,6 +557,7 @@ def main():
     parser.add_argument("--far-snr-high-fraction", type=float, default=0.0)
     parser.add_argument("--far-snr-high-min", type=float, default=None)
     parser.add_argument("--far-snr-high-max", type=float, default=None)
+    parser.add_argument("--far-preserve-rir-max-snr", type=float, default=None)
     parser.add_argument("--far-ms-continuous-weight", type=float, default=0.45)
     parser.add_argument("--far-ooffice-weight", type=float, default=0.35)
     parser.add_argument("--far-esc-background-weight", type=float, default=0.20)

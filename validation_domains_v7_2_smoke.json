@@ -1,0 +1,103 @@
+{
+  "domains": [
+    {
+      "name": "v7_2_near_low",
+      "noisy": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_2_smoke\\generated\\metadata\\valid.csv",
+      "include_scene_types": ["hvac_noise", "noise_no_rir"],
+      "require_empty_fields": ["student_murmur_file"],
+      "numeric_filters": {"background_snr_db": {"max": 4.0}},
+      "max_files": 64,
+      "sample_seed": 2026073001,
+      "weight": 1.25,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 2.0, "min_pesq_change": 0.05, "min_stoi_change": 0.02}
+    },
+    {
+      "name": "v7_2_near_main",
+      "noisy": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_2_smoke\\generated\\metadata\\valid.csv",
+      "include_scene_types": ["hvac_noise", "noise_no_rir"],
+      "require_empty_fields": ["student_murmur_file"],
+      "numeric_filters": {"background_snr_db": {"min": 4.0, "max": 8.0}},
+      "max_files": 64,
+      "sample_seed": 2026073002,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 3.5, "min_pesq_change": 0.25, "min_stoi_change": 0.03}
+    },
+    {
+      "name": "v7_2_near_high",
+      "noisy": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_2_smoke\\generated\\metadata\\valid.csv",
+      "include_scene_types": ["hvac_noise", "noise_no_rir"],
+      "require_empty_fields": ["student_murmur_file"],
+      "numeric_filters": {"background_snr_db": {"min": 8.0}},
+      "max_files": 32,
+      "sample_seed": 2026073003,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 0.0, "min_pesq_change": 0.10, "min_stoi_change": 0.0}
+    },
+    {
+      "name": "v7_2_far_preserved",
+      "noisy": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_2_smoke\\generated\\metadata\\valid.csv",
+      "include_scene_types": ["far_speech"],
+      "numeric_filters": {"background_snr_db": {"max": 6.0}},
+      "max_files": 64,
+      "sample_seed": 2026073004,
+      "weight": 1.25,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 3.5, "min_pesq_change": 0.15, "min_stoi_change": 0.03}
+    },
+    {
+      "name": "v7_2_murmur",
+      "noisy": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\noisy",
+      "clean": "..\\dataset_classroom_v7_2_smoke\\generated\\valid\\clean",
+      "metadata_csv": "..\\dataset_classroom_v7_2_smoke\\generated\\metadata\\valid.csv",
+      "exclude_scene_types": ["identity", "noise_only"],
+      "require_nonempty_fields": ["student_murmur_file"],
+      "max_files": 64,
+      "sample_seed": 2026073005,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 1.0},
+      "gate": {"min_si_snr_change": 3.5, "min_pesq_change": 0.15, "min_stoi_change": 0.03}
+    },
+    {
+      "name": "zh_clean_raw",
+      "noisy": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\raw\\noisy",
+      "clean": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\raw\\clean",
+      "identity": true,
+      "max_files": 60,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_db", "direction": "max", "scale": 20.0},
+      "gate": {"min_si_snr_db": 60.0, "min_si_snr_p10_db": 30.0, "min_pesq_change": -0.05, "min_stoi_change": -0.002}
+    },
+    {
+      "name": "zh_clean_norm",
+      "noisy": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\normalized\\noisy",
+      "clean": "..\\dataset_classroom_v5_chinese\\zh_clean_valid\\normalized\\clean",
+      "identity": true,
+      "max_files": 60,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_db", "direction": "max", "scale": 20.0},
+      "gate": {"min_si_snr_db": 55.0, "min_si_snr_p10_db": 20.0, "min_pesq_change": -0.10, "min_stoi_change": -0.005}
+    },
+    {
+      "name": "voicebank",
+      "noisy": "..\\dataset_voicebank_replay_v4\\generated\\valid\\noisy",
+      "clean": "..\\dataset_voicebank_replay_v4\\generated\\valid\\clean",
+      "manifest": "..\\dataset_voicebank_replay_v4\\generated\\metadata\\valid.json",
+      "max_files": 128,
+      "sample_seed": 2026073006,
+      "weight": 1.0,
+      "selection": {"metric": "si_snr_change", "direction": "max", "scale": 3.0},
+      "gate": {"min_si_snr_change": 3.0, "min_pesq_change": 0.25, "min_stoi_change": 0.0}
+    }
+  ]
+}
