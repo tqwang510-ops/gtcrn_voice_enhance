@@ -68,3 +68,8 @@ New baseline evaluations made after the validation-accounting repair should incl
 - v7.1 test evaluation: `runs/v7_1_eval/v7_1_test/`
 - v5 baseline on the same test: `runs/v7_1_eval/v5_on_v7_1_test/`
 - v4 regression: `runs/v7_1_eval/v4_test/` (pending at documentation time)
+- v7.1 command/generation/evaluation logs: `runs/v7_1_eval/logs/`
+- v7.1 audit/provenance JSON: `runs/v7_1_eval/provenance/`
+- v7.1 listening manifest: `runs/v7_1_eval/listening_manifest.json`
+- v5 listening output: `runs/v7_1_eval/listening/01_v5/`
+- v7.1 listening output: `runs/v7_1_eval/listening/02_v7_1_best/`
