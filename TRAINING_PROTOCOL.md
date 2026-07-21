@@ -3523,3 +3523,11 @@ runs/v7_1_eval/listening/03_v7_2_smoke/
 当前 GTCRN/loss 上继续微调，转入更强模型或成熟持续噪声前端对照；若通过，
 再以 v7.2 两个开关（far-preserve-rir、speech-underestimate-weight）生成正式
 数据并训练。
+
+**复跑确认（2026-07-20）**：用户随后用同一命令自行重跑了一遍 3 epoch smoke
+（`--overwrite-run` 覆盖助手那次）。同 seed 下指标逐域一致（差异 ≤0.01 dB，
+为 GPU 非确定性噪声），唯一差别是 best.tar 由 epoch 2 变为 epoch 1
+（selection 前三 epoch 相差 <0.08，属同一水平）。`03_v7_2_smoke` 试听矩阵与
+13 文件指标已用当前 best.tar（epoch 1）重新导出，结论不变：01 +7.87、
+04 +2.35、07 +4.74、11 identity -43.61（PESQ 0.000）、12 -6.75、13 -7.65。
+这同时说明 v7.2 的 3 epoch smoke 在同 seed 下行为可复现。
