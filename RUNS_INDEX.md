@@ -90,3 +90,10 @@ New baseline evaluations made after the validation-accounting repair should incl
 - v4 test: `runs/v7_1_eval/v4_test/summary.json`
 - v2 test: `runs/v7_1_eval/v2_test/summary.json`
 - VoiceBank test: `runs/v7_1_eval/voicebank_test/summary.json`
+
+## Official GTCRN zero-training diagnostic
+
+- Same-file DNS3/VCTK comparison: `runs/official_gtcrn_diagnostic/listening/`
+- Files are ordered as noisy, v7.2, official DNS3, official VCTK, and clean.
+- This is an architecture/initialization diagnostic only; the official models use a
+  different 512/256 STFT and are not current low-latency deployment candidates.
