@@ -23,6 +23,12 @@ def parse_args():
     parser.add_argument("--attack-ms", type=float, default=10.0)
     parser.add_argument("--release-ms", type=float, default=30.0)
     parser.add_argument("--max-gain", type=float, default=2.0)
+    parser.add_argument(
+        "--preserve-frame-energy",
+        action="store_true",
+        help="Match each smoothed frame's magnitude energy to the original enhancement.",
+    )
+    parser.add_argument("--max-frame-compensation-db", type=float, default=6.0)
     parser.add_argument("--center", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
@@ -75,6 +81,15 @@ def main():
         previous = smoothed_gain[:, frame - 1]
         coefficient = torch.where(target < previous, attack, release)
         smoothed_gain[:, frame] = coefficient * previous + (1.0 - coefficient) * target
+
+    if args.preserve_frame_energy:
+        noisy_power = noisy_mag.square()
+        raw_power = torch.sum(raw_gain.square() * noisy_power, dim=0)
+        smoothed_power = torch.sum(smoothed_gain.square() * noisy_power, dim=0)
+        frame_scale = torch.sqrt((raw_power + 1e-12) / (smoothed_power + 1e-12))
+        maximum_scale = 10.0 ** (args.max_frame_compensation_db / 20.0)
+        frame_scale = torch.clamp(frame_scale, 1.0 / maximum_scale, maximum_scale)
+        smoothed_gain = smoothed_gain * frame_scale[None, :]
 
     scale = smoothed_gain / (raw_gain + 1e-7)
     smoothed_spec = enhanced_spec * scale[..., None]
