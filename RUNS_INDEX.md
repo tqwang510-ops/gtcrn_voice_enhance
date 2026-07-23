@@ -79,4 +79,14 @@ New baseline evaluations made after the validation-accounting repair should incl
 - Smoke dataset: `../dataset_classroom_v7_2_smoke/generated/`
 - Validation config: `validation_domains_v7_2_smoke.json`
 - v7.1 initialization baseline: `runs/v7_2_eval/provenance/v7_2_smoke_baseline.json`
-- Training output after user runs it: `runs/classroom_v7_2_smoke/`
+- Reproduced training output: `runs/classroom_v7_2_smoke/` (best = epoch 1)
+- Same-file v7.1 comparison: `runs/v7_2_eval/listening/01_v7_1/`
+- Same-file v7.2 comparison: `runs/v7_2_eval/listening/02_v7_2_epoch1/`
+- Thirteen-file metrics: `runs/v7_2_eval/listening13_metrics/`
+- Causal gain-smoothing audition: `runs/v7_2_eval/listening_gain_smoothing/`
+
+## Completed v7.1 regressions
+
+- v4 test: `runs/v7_1_eval/v4_test/summary.json`
+- v2 test: `runs/v7_1_eval/v2_test/summary.json`
+- VoiceBank test: `runs/v7_1_eval/voicebank_test/summary.json`
