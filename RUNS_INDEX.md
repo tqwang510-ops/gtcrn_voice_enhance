@@ -97,3 +97,11 @@ New baseline evaluations made after the validation-accounting repair should incl
 - Files are ordered as noisy, v7.2, official DNS3, official VCTK, and clean.
 - This is an architecture/initialization diagnostic only; the official models use a
   different 512/256 STFT and are not current low-latency deployment candidates.
+
+## DNS3 STFT compatibility diagnostic
+
+- Same-file native/20 ms/10 ms comparison: `runs/dns3_stft_diagnostic/listening/`
+- Native DNS3 uses a 32 ms window and 16 ms hop; the two diagnostic variants use a
+  5 ms hop with 20 ms and 10 ms windows.
+- The low-latency files use unadapted official weights and are compatibility probes,
+  not trained models or deployment candidates.
