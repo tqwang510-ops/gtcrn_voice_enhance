@@ -114,3 +114,25 @@ New baseline evaluations made after the validation-accounting repair should incl
   checkpoint until the complete regression and streaming matrices pass.
 - DeepFilterNet and further denoising-strength training are out of scope for the
   frozen GTCRN delivery branch.
+
+## v7.2 full offline regression (protocol 17.31 step 1)
+
+- Runner script: `runs/v7_2_eval/run_full_regression.sh`
+- Outputs: `runs/v7_2_eval/full_regression/{v7_1_test,v4_test,v2_test,voicebank_test,aishell_clean_raw,aishell_clean_norm}/`
+- Comparison baselines: `runs/v7_1_eval/` (v7.1 epoch 12 on the same files)
+- Result: v7.2 epoch 1 matches or beats v7.1 on all six evaluations; clean passthrough
+  clearly better everywhere; see `TRAINING_PROTOCOL.md` 17.32.
+
+## Frozen release checkpoint (protocol 17.34)
+
+- Release file: `release/gtcrn_classroom_v7_2_epoch1.tar`
+- SHA256: `6f38816cf6d31a3578c699986d89b15101efc70ca1e4fdb6025a66dce24b472a`
+- Release notes: `release/RELEASE_NOTES.md`
+- Expanded listening matrix (31 groups): `runs/v7_2_eval/listening_expanded/`
+
+## Streaming consistency check (protocol 17.35)
+
+- Script: `verify_streaming_consistency.py`
+- Outputs: `runs/v7_2_eval/streaming_check/` (REPORT.md, summary.json, 4 offline/stream wav pairs)
+- Result: passed; steady-state difference SNR > 30 dB on all files, no block-boundary
+  artifacts, stream caches mathematically equal to offline forward (~1e-6).
