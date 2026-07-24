@@ -105,3 +105,12 @@ New baseline evaluations made after the validation-accounting repair should incl
   5 ms hop with 20 ms and 10 ms windows.
 - The low-latency files use unadapted official weights and are compatibility probes,
   not trained models or deployment candidates.
+
+## Frozen GTCRN candidate
+
+- Subjective candidate: `runs/classroom_v7_2_smoke/checkpoints/best.tar` (epoch 1).
+- Parent/formal baseline: `runs/classroom_v7_1/checkpoints/best.tar` (epoch 12).
+- The v7.2 checkpoint is preferred for speech preservation, but remains a smoke
+  checkpoint until the complete regression and streaming matrices pass.
+- DeepFilterNet and further denoising-strength training are out of scope for the
+  frozen GTCRN delivery branch.
